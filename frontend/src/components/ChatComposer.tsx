@@ -33,6 +33,7 @@ type ChatComposerProps = {
   summarizeDraft: (text: string) => string;
   isRoomSelected: boolean;
   isMobileInputMode: boolean;
+  themeMode: 'light' | 'dark';
   cryptoReady: boolean;
   wsConnected: boolean;
   roomMembers: User[];
@@ -62,6 +63,7 @@ export const ChatComposer = memo(function ChatComposer({
   summarizeDraft,
   isRoomSelected,
   isMobileInputMode,
+  themeMode,
   cryptoReady,
   wsConnected,
   roomMembers,
@@ -124,6 +126,7 @@ export const ChatComposer = memo(function ChatComposer({
     if (!triggerRef.current) return null;
 
     const rect = triggerRef.current.getBoundingClientRect();
+    const chatMainRect = triggerRef.current.closest('.chat-main')?.getBoundingClientRect();
     const viewportHeight = window.innerHeight;
     const viewportWidth = window.innerWidth;
     const isMobile = viewportWidth <= 640;
@@ -147,7 +150,20 @@ export const ChatComposer = memo(function ChatComposer({
         top = Math.max(12, viewportHeight - pickerHeight - 12);
       }
 
-      left = Math.max(12, Math.min(rect.left, viewportWidth - pickerWidth - 12));
+      const minLeft = chatMainRect
+        ? Math.max(12, chatMainRect.left + 12)
+        : 12;
+      const maxLeftInViewport = viewportWidth - pickerWidth - 12;
+      const maxLeftInChatMain = chatMainRect
+        ? chatMainRect.right - pickerWidth - 12
+        : maxLeftInViewport;
+      const maxLeft = Math.min(maxLeftInViewport, maxLeftInChatMain);
+
+      if (maxLeft <= minLeft) {
+        left = Math.max(12, Math.min(rect.left, maxLeftInViewport));
+      } else {
+        left = Math.max(minLeft, Math.min(rect.left, maxLeft));
+      }
     }
 
     return { top, left, width: pickerWidth, height: pickerHeight };
@@ -324,7 +340,7 @@ export const ChatComposer = memo(function ChatComposer({
                   <EmojiPicker
                     onEmojiClick={handleEmojiClick}
                     autoFocusSearch={false}
-                    theme={Theme.AUTO}
+                    theme={themeMode === 'dark' ? Theme.DARK : Theme.LIGHT}
                     emojiStyle={EmojiStyle.NATIVE}
                     lazyLoadEmojis={true}
                     width={pickerLayout.width}

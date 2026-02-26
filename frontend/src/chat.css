@@ -506,6 +506,18 @@ mark.search-highlight {
     color: var(--accent-primary);
 }
 
+.bubble.own .bubble-action-btn {
+    background: var(--bg-elevated);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+.bubble.own .bubble-action-btn:hover {
+    background: var(--accent-primary-ghost);
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+}
+
 .bubble-main {
     cursor: pointer;
 }
@@ -784,11 +796,12 @@ mark.search-highlight {
 .emoji-picker-popover {
     position: fixed;
     bottom: auto;
-    z-index: 1000;
+    z-index: 4000;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
     border-radius: 12px;
     animation: fade-slide-up 0.15s ease-out forwards;
     overflow: visible;
+    pointer-events: auto;
 }
 
 .reply-inline {

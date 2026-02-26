@@ -436,6 +436,7 @@ export function ChatPage({
             replyTarget={replyTarget}
             summarizeDraft={summarizeDraft}
             isMobileInputMode={isMobileInputMode}
+            themeMode={themeMode}
             cryptoReady={cryptoReady}
             wsConnected={wsConnected}
             roomMembers={roomMembers}
