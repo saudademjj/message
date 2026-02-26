@@ -251,16 +251,37 @@
         gap: 3px;
     }
 
+    .composer-row {
+        gap: 6px;
+        align-items: flex-end;
+    }
+
+    .emoji-trigger-btn {
+        min-height: 36px;
+        min-width: 36px;
+        padding: 0 8px;
+        border-radius: 10px;
+        font-size: 1.08rem;
+    }
+
+    .composer-input-wrapper {
+        border-radius: 10px;
+        min-height: 36px;
+        padding: 0 10px;
+    }
+
     .composer-input-wrapper textarea {
         font-size: 16px;
-        padding: 8px 0;
-        min-height: 28px;
+        line-height: 1.45;
+        padding: 7px 0;
+        min-height: 24px;
     }
 
     .composer-actions {
         flex-direction: row;
         align-items: center;
         justify-content: flex-end;
+        gap: 6px;
     }
 
     .queue-failed-item {
