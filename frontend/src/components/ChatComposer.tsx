@@ -1,6 +1,7 @@
 import { memo, useState, useRef, useEffect, useCallback } from 'react';
 import type { FormEvent, KeyboardEvent, RefObject } from 'react';
 import EmojiPicker, { Theme, EmojiStyle } from 'emoji-picker-react';
+import { createPortal } from 'react-dom';
 import type { User } from '../types';
 
 export type ComposerReplyTarget = {
@@ -37,6 +38,13 @@ type ChatComposerProps = {
   roomMembers: User[];
 };
 
+type EmojiPickerLayout = {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+};
+
 export const ChatComposer = memo(function ChatComposer({
   draft,
   replyTarget,
@@ -59,9 +67,9 @@ export const ChatComposer = memo(function ChatComposer({
   roomMembers,
 }: ChatComposerProps) {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const pickerRef = useRef<HTMLDivElement | null>(null);
+  const pickerPopoverRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const [pickerPosition, setPickerPosition] = useState<{ top: number; left: number } | null>(null);
+  const [pickerLayout, setPickerLayout] = useState<EmojiPickerLayout | null>(null);
 
   // Mention State
   const [mentionState, setMentionState] = useState<{
@@ -83,55 +91,95 @@ export const ChatComposer = memo(function ChatComposer({
   );
 
   useEffect(() => {
-    const handleGlobalClick = (e: MouseEvent) => {
-      if (showEmojiPicker) {
-        const target = e.target as Node;
-        if (
-          pickerRef.current?.contains(target) ||
-          triggerRef.current?.contains(target)
-        ) {
-          return;
-        }
-        setShowEmojiPicker(false);
+    if (!showEmojiPicker) {
+      return;
+    }
+
+    const handleGlobalPointerDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
       }
+
+      if (
+        pickerPopoverRef.current?.contains(target) ||
+        triggerRef.current?.contains(target)
+      ) {
+        return;
+      }
+
+      setShowEmojiPicker(false);
     };
-    document.addEventListener('mousedown', handleGlobalClick);
-    return () => document.removeEventListener('mousedown', handleGlobalClick);
+
+    document.addEventListener('mousedown', handleGlobalPointerDown);
+    document.addEventListener('touchstart', handleGlobalPointerDown, { passive: true });
+
+    return () => {
+      document.removeEventListener('mousedown', handleGlobalPointerDown);
+      document.removeEventListener('touchstart', handleGlobalPointerDown);
+    };
   }, [showEmojiPicker]);
 
-  const calculatePickerPosition = useCallback(() => {
+  const calculatePickerLayout = useCallback((): EmojiPickerLayout | null => {
     if (!triggerRef.current) return null;
+
     const rect = triggerRef.current.getBoundingClientRect();
-    const pickerHeight = 400;
-    const pickerWidth = 320;
     const viewportHeight = window.innerHeight;
     const viewportWidth = window.innerWidth;
     const isMobile = viewportWidth <= 640;
+    const pickerWidth = Math.max(220, Math.min(320, viewportWidth - 24));
+    const pickerHeight = Math.max(220, Math.min(400, viewportHeight - 24));
+
     let top: number;
     let left: number;
+
     if (isMobile) {
-      top = viewportHeight - pickerHeight - 12;
-      left = 12;
+      top = Math.max(12, viewportHeight - pickerHeight - 12);
+      left = Math.max(12, Math.min((viewportWidth - pickerWidth) / 2, viewportWidth - pickerWidth - 12));
     } else {
       if (rect.top >= pickerHeight + 12) {
         top = rect.top - pickerHeight - 12;
       } else {
         top = rect.bottom + 12;
       }
+
+      if (top + pickerHeight > viewportHeight - 12) {
+        top = Math.max(12, viewportHeight - pickerHeight - 12);
+      }
+
       left = Math.max(12, Math.min(rect.left, viewportWidth - pickerWidth - 12));
     }
-    return { top, left };
+
+    return { top, left, width: pickerWidth, height: pickerHeight };
   }, []);
+
+  useEffect(() => {
+    if (!showEmojiPicker) {
+      return;
+    }
+
+    const syncPickerLayout = () => {
+      setPickerLayout(calculatePickerLayout());
+    };
+
+    syncPickerLayout();
+    window.addEventListener('resize', syncPickerLayout);
+    window.addEventListener('scroll', syncPickerLayout, true);
+
+    return () => {
+      window.removeEventListener('resize', syncPickerLayout);
+      window.removeEventListener('scroll', syncPickerLayout, true);
+    };
+  }, [calculatePickerLayout, showEmojiPicker]);
 
   const handleToggleEmojiPicker = useCallback(() => {
     setShowEmojiPicker((prev) => {
       if (!prev) {
-        const position = calculatePickerPosition();
-        setPickerPosition(position);
+        setPickerLayout(calculatePickerLayout());
       }
       return !prev;
     });
-  }, [calculatePickerPosition]);
+  }, [calculatePickerLayout]);
 
   const handleEmojiClick = (emojiData: { emoji: string }) => {
     const input = draftInputRef.current;
@@ -256,7 +304,7 @@ export const ChatComposer = memo(function ChatComposer({
         ) : null}
 
         <div className="composer-row">
-          <div className="emoji-picker-wrapper" ref={pickerRef}>
+          <div className="emoji-picker-wrapper">
             <button
               type="button"
               className="ghost-btn emoji-trigger-btn"
@@ -266,24 +314,28 @@ export const ChatComposer = memo(function ChatComposer({
             >
               😊
             </button>
-            {showEmojiPicker && pickerPosition && (
-              <div
-                className="emoji-picker-popover"
-                style={{ top: pickerPosition.top, left: pickerPosition.left }}
-              >
-                <EmojiPicker
-                  onEmojiClick={handleEmojiClick}
-                  autoFocusSearch={false}
-                  theme={Theme.AUTO}
-                  emojiStyle={EmojiStyle.NATIVE}
-                  lazyLoadEmojis={true}
-                  width={320}
-                  height={400}
-                  searchPlaceHolder="搜索表情..."
-                  skinTonesDisabled={false}
-                />
-              </div>
-            )}
+            {showEmojiPicker && pickerLayout
+              ? createPortal(
+                <div
+                  className="emoji-picker-popover"
+                  style={{ top: pickerLayout.top, left: pickerLayout.left, width: pickerLayout.width }}
+                  ref={pickerPopoverRef}
+                >
+                  <EmojiPicker
+                    onEmojiClick={handleEmojiClick}
+                    autoFocusSearch={false}
+                    theme={Theme.AUTO}
+                    emojiStyle={EmojiStyle.NATIVE}
+                    lazyLoadEmojis={true}
+                    width={pickerLayout.width}
+                    height={pickerLayout.height}
+                    searchPlaceHolder="搜索表情..."
+                    skinTonesDisabled={false}
+                  />
+                </div>,
+                document.body
+              )
+              : null}
           </div>
 
           <div className="composer-input-wrapper">
