@@ -8,6 +8,7 @@ import type { SendQueueItem } from '../app/appTypes';
 import { formatError } from '../app/helpers';
 import { useChatStore } from '../stores/chatStore';
 import type { Peer, User } from '../types';
+import { rememberOutgoingPlaintext } from '../outgoingPlaintextCache';
 
 type ValueOrUpdater<T> = T | ((previous: T) => T);
 
@@ -193,6 +194,9 @@ export function useSendQueue({
         });
         if (!sent) {
           throw new Error('WebSocket 未连接');
+        }
+        if (payload.signature) {
+          rememberOutgoingPlaintext(authUserID, selectedRoomID, payload.signature, target.text);
         }
 
         replaceQueue(sendQueueRef.current.filter((item) => item.id !== target.id));
