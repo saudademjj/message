@@ -4,7 +4,7 @@ import {
   ONE_TIME_PREKEY_TARGET,
   SIGNED_PREKEY_HISTORY_LIMIT,
 } from './constants';
-import { normalizeIdentityRecord, readIdentityRecord, writeIdentityRecord } from './store';
+import { readIdentityRecord, writeIdentityRecord } from './store';
 import type {
   Identity,
   PersistedIdentityRecord,
@@ -28,7 +28,7 @@ async function importECDHPrivateKey(jwk: JsonWebKey): Promise<CryptoKey> {
     'jwk',
     jwk,
     { name: 'ECDH', namedCurve: 'P-256' },
-    false,
+    true,
     ['deriveBits'],
   );
 }
@@ -80,7 +80,7 @@ async function generateSigningKeyMaterial(): Promise<{
     'jwk',
     privateKeyJwk,
     { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
+    true,
     ['sign'],
   );
   const signingPublicKey = await crypto.subtle.importKey(
@@ -192,7 +192,7 @@ async function ensureIdentityRecord(
   signedPreKeyHistoryLimit: number,
   oneTimePreKeyTarget: number,
 ): Promise<{ record: PersistedIdentityRecord; changed: boolean }> {
-  const existing = normalizeIdentityRecord(await readIdentityRecord(userID), userID);
+  const existing = await readIdentityRecord(userID);
   if (!existing) {
     return {
       record: await createIdentityRecord(userID),
@@ -315,7 +315,7 @@ export async function consumeOneTimePreKey(identity: Identity, keyID: number): P
   if (!Number.isFinite(keyID) || keyID <= 0) {
     return;
   }
-  const existing = normalizeIdentityRecord(await readIdentityRecord(identity.userID), identity.userID);
+  const existing = await readIdentityRecord(identity.userID);
   if (!existing) {
     return;
   }

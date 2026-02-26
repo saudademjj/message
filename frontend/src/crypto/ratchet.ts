@@ -47,7 +47,7 @@ async function generateRatchetKeyPair(): Promise<{ privateKey: CryptoKey; public
     'jwk',
     privateKeyJwk,
     { name: 'ECDH', namedCurve: 'P-256' },
-    false,
+    true,
     ['deriveBits'],
   );
   const publicKey = await crypto.subtle.importKey(

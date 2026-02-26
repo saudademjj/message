@@ -7,7 +7,8 @@ const KEY_STORE = 'keys';
 
 type MessageKeyRecord = {
   userID: number;
-  key: CryptoKey;
+  key?: CryptoKey;
+  keyRawB64?: string;
   createdAt: string;
 };
 
@@ -106,14 +107,45 @@ function normalizeMessageKeyRecord(raw: unknown): MessageKeyRecord | null {
   if (!isObject(raw)) {
     return null;
   }
-  if (!Number.isFinite(Number(raw.userID)) || !isCryptoKey(raw.key)) {
+  if (!Number.isFinite(Number(raw.userID))) {
+    return null;
+  }
+  const key = isCryptoKey(raw.key) ? raw.key : undefined;
+  const keyRawB64 = typeof raw.keyRawB64 === 'string' && raw.keyRawB64.trim()
+    ? raw.keyRawB64.trim()
+    : undefined;
+  if (!key && !keyRawB64) {
     return null;
   }
   return {
     userID: Number(raw.userID),
-    key: raw.key,
+    key,
+    keyRawB64,
     createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
   };
+}
+
+async function importMessageKeyFromRawB64(rawB64: string): Promise<CryptoKey | null> {
+  try {
+    return await crypto.subtle.importKey(
+      'raw',
+      fromBase64(rawB64),
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt'],
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function exportMessageKeyToRawB64(key: CryptoKey): Promise<string | null> {
+  try {
+    const raw = await crypto.subtle.exportKey('raw', key);
+    return toBase64(raw);
+  } catch {
+    return null;
+  }
 }
 
 async function openMessageDB(): Promise<IDBDatabase> {
@@ -137,26 +169,52 @@ async function readUserKeyFromDB(db: IDBDatabase, userID: number): Promise<Crypt
   return new Promise((resolve, reject) => {
     const tx = db.transaction(KEY_STORE, 'readonly');
     const request = tx.objectStore(KEY_STORE).get(userID);
-    request.onsuccess = () => {
+    request.onsuccess = () => void (async () => {
       const record = normalizeMessageKeyRecord(request.result);
-      resolve(record?.key ?? null);
-    };
+      if (!record) {
+        resolve(null);
+        return;
+      }
+      if (record.key) {
+        resolve(record.key);
+        return;
+      }
+      if (record.keyRawB64) {
+        resolve(await importMessageKeyFromRawB64(record.keyRawB64));
+        return;
+      }
+      resolve(null);
+    })();
     request.onerror = () => reject(request.error ?? new Error('failed to read local message key'));
   });
 }
 
 async function writeUserKeyToDB(db: IDBDatabase, userID: number, key: CryptoKey): Promise<void> {
+  const putValue = (value: MessageKeyRecord) => new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(KEY_STORE, 'readwrite');
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error('failed to store local message key'));
+    tx.objectStore(KEY_STORE).put(value);
+  });
   try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(KEY_STORE, 'readwrite');
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error ?? new Error('failed to store local message key'));
-      tx.objectStore(KEY_STORE).put({
+    try {
+      await putValue({
         userID,
         key,
         createdAt: new Date().toISOString(),
-      } satisfies MessageKeyRecord);
-    });
+      });
+      return;
+    } catch {
+      const keyRawB64 = await exportMessageKeyToRawB64(key);
+      if (!keyRawB64) {
+        return;
+      }
+      await putValue({
+        userID,
+        keyRawB64,
+        createdAt: new Date().toISOString(),
+      });
+    }
   } catch {
     // IDB write failed — key cache miss is acceptable
   }
@@ -191,7 +249,7 @@ async function getUserMessageKey(userID: number, createIfMissing: boolean): Prom
 
       const generated = await crypto.subtle.generateKey(
         { name: 'AES-GCM', length: 256 },
-        false,
+        true,
         ['encrypt', 'decrypt'],
       );
       if (!isCryptoKey(generated)) {
