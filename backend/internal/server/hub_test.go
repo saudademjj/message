@@ -80,3 +80,32 @@ func TestHubRemoveClient(t *testing.T) {
 		t.Fatalf("expected room to be removed after last client leaves")
 	}
 }
+
+func TestHubUnicastToDevice(t *testing.T) {
+	t.Parallel()
+
+	hub := NewHub()
+	aliceMobile := &Client{roomID: 9, userID: 1, username: "alice", deviceID: "mobile-01", send: make(chan []byte, 2)}
+	aliceDesktop := &Client{roomID: 9, userID: 1, username: "alice", deviceID: "desktop-01", send: make(chan []byte, 2)}
+	bobMobile := &Client{roomID: 9, userID: 2, username: "bob", deviceID: "mobile-02", send: make(chan []byte, 2)}
+
+	hub.AddClient(aliceMobile)
+	hub.AddClient(aliceDesktop)
+	hub.AddClient(bobMobile)
+
+	hub.UnicastToDevice(9, 1, "desktop-01", []byte("desktop-only"))
+
+	if got := <-aliceDesktop.send; string(got) != "desktop-only" {
+		t.Fatalf("unexpected desktop payload: %q", string(got))
+	}
+	select {
+	case <-aliceMobile.send:
+		t.Fatalf("mobile client should not receive desktop-targeted unicast")
+	default:
+	}
+	select {
+	case <-bobMobile.send:
+		t.Fatalf("different user should not receive device-targeted unicast")
+	default:
+	}
+}

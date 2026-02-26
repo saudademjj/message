@@ -1,17 +1,20 @@
 import type {
   ChatMessage,
+  DeviceSnapshot,
   Room,
   SafetyNumberSnapshot,
-  SignalPreKeyBundle,
+  SignalPreKeyBundleList,
   User,
 } from './types';
 
 type LoginResponse = {
   user: User;
+  device: DeviceSessionInfo;
 };
 
 type SessionResponse = {
   user: User;
+  device: DeviceSessionInfo;
 };
 
 type RoomsResponse = {
@@ -90,6 +93,23 @@ type SignalPreKeyUploadResponse = {
   userId: number;
   signedPreKeyId: number;
   uploadedOneTimeKeys: number;
+};
+
+type DeviceSessionInfo = {
+  deviceId: string;
+  deviceName: string;
+  sessionVersion: number;
+  lastSeenAt: string;
+};
+
+type DevicesResponse = {
+  devices: DeviceSnapshot[];
+};
+
+type DeviceMutationResponse = {
+  device: DeviceSnapshot;
+  revoked?: boolean;
+  forcedLogout?: boolean;
 };
 
 export type ApiErrorCode = 'timeout' | 'aborted' | 'network' | 'http';
@@ -456,13 +476,13 @@ export class ApiClient {
   async fetchSignalPreKeyBundle(
     userID: number,
     options: ApiRequestOptions = {},
-  ): Promise<SignalPreKeyBundle> {
+  ): Promise<SignalPreKeyBundleList> {
     const response = await this.request(
       `/api/signal/prekey-bundle/${userID}`,
       {},
       options,
     );
-    return parseJSON<SignalPreKeyBundle>(response);
+    return parseJSON<SignalPreKeyBundleList>(response);
   }
 
   async fetchSignalSafetyNumber(
@@ -510,5 +530,40 @@ export class ApiClient {
       options,
     );
     return parseJSON<AdminDeleteUserResponse>(response);
+  }
+
+  async listDevices(options: ApiRequestOptions = {}): Promise<DevicesResponse> {
+    const response = await this.request('/api/devices', {}, options);
+    return parseJSON<DevicesResponse>(response);
+  }
+
+  async renameDevice(
+    deviceID: string,
+    deviceName: string,
+    options: ApiRequestOptions = {},
+  ): Promise<DeviceMutationResponse> {
+    const response = await this.request(
+      `/api/devices/${encodeURIComponent(deviceID)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ deviceName }),
+      },
+      options,
+    );
+    return parseJSON<DeviceMutationResponse>(response);
+  }
+
+  async revokeDevice(deviceID: string, options: ApiRequestOptions = {}): Promise<DeviceMutationResponse> {
+    const response = await this.request(
+      `/api/devices/${encodeURIComponent(deviceID)}`,
+      {
+        method: 'DELETE',
+      },
+      options,
+    );
+    return parseJSON<DeviceMutationResponse>(response);
   }
 }

@@ -50,8 +50,13 @@ func (a *App) effectiveAccessTokenTTL() time.Duration {
 	return time.Duration(defaultAccessTokenMins) * time.Minute
 }
 
-func (a *App) issueRefreshToken(ctx context.Context, userID int64) (string, error) {
-	if userID <= 0 {
+func (a *App) issueRefreshToken(
+	ctx context.Context,
+	userID int64,
+	deviceID string,
+	deviceSessionVersion int,
+) (string, error) {
+	if userID <= 0 || normalizeDeviceID(deviceID) == "" || deviceSessionVersion <= 0 {
 		return "", errRefreshTokenInvalid
 	}
 	token, err := generateRefreshToken()
@@ -63,9 +68,11 @@ func (a *App) issueRefreshToken(ctx context.Context, userID int64) (string, erro
 	expiresAt := now.Add(a.effectiveRefreshTokenTTL())
 	if _, err := a.db.ExecContext(
 		ctx,
-		`INSERT INTO auth_refresh_tokens(user_id, token_hash, expires_at, created_at, last_used_at)
-		 VALUES ($1, $2, $3, $4, $4)`,
+		`INSERT INTO auth_refresh_tokens(user_id, device_id, device_session_version, token_hash, expires_at, created_at, last_used_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $6)`,
 		userID,
+		deviceID,
+		deviceSessionVersion,
 		hashed,
 		expiresAt,
 		now,
@@ -91,16 +98,18 @@ func (a *App) rotateRefreshToken(ctx context.Context, presentedToken string) (Au
 	hashed := hashRefreshToken(token)
 	var tokenID int64
 	var userID int64
+	var deviceID string
+	var tokenDeviceSessionVersion int
 	var expiresAt time.Time
 	var revokedAt sql.NullTime
 	err = tx.QueryRowContext(
 		ctx,
-		`SELECT id, user_id, expires_at, revoked_at
+		`SELECT id, user_id, device_id, device_session_version, expires_at, revoked_at
 		   FROM auth_refresh_tokens
 		  WHERE token_hash = $1
 		  FOR UPDATE`,
 		hashed,
-	).Scan(&tokenID, &userID, &expiresAt, &revokedAt)
+	).Scan(&tokenID, &userID, &deviceID, &tokenDeviceSessionVersion, &expiresAt, &revokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthContext{}, "", errRefreshTokenInvalid
 	}
@@ -108,6 +117,9 @@ func (a *App) rotateRefreshToken(ctx context.Context, presentedToken string) (Au
 		return AuthContext{}, "", err
 	}
 	if revokedAt.Valid {
+		return AuthContext{}, "", errRefreshTokenInvalid
+	}
+	if normalizeDeviceID(deviceID) == "" || tokenDeviceSessionVersion <= 0 {
 		return AuthContext{}, "", errRefreshTokenInvalid
 	}
 	if !expiresAt.After(now) {
@@ -150,6 +162,41 @@ func (a *App) rotateRefreshToken(ctx context.Context, presentedToken string) (Au
 		return AuthContext{}, "", errRefreshTokenInvalid
 	}
 
+	var deviceName string
+	var currentDeviceSessionVersion int
+	var lastSeenAt time.Time
+	var deviceRevokedAt sql.NullTime
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT device_name, session_version, last_seen_at, revoked_at
+		   FROM user_devices
+		  WHERE user_id = $1 AND device_id = $2
+		  FOR UPDATE`,
+		userID,
+		deviceID,
+	).Scan(&deviceName, &currentDeviceSessionVersion, &lastSeenAt, &deviceRevokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AuthContext{}, "", errRefreshTokenInvalid
+	}
+	if err != nil {
+		return AuthContext{}, "", err
+	}
+	if deviceRevokedAt.Valid || currentDeviceSessionVersion != tokenDeviceSessionVersion {
+		return AuthContext{}, "", errRefreshTokenInvalid
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE user_devices
+		    SET last_seen_at = $3
+		  WHERE user_id = $1 AND device_id = $2`,
+		userID,
+		deviceID,
+		now,
+	); err != nil {
+		return AuthContext{}, "", err
+	}
+
 	newToken, err := generateRefreshToken()
 	if err != nil {
 		return AuthContext{}, "", err
@@ -158,9 +205,11 @@ func (a *App) rotateRefreshToken(ctx context.Context, presentedToken string) (Au
 	newExpiresAt := now.Add(a.effectiveRefreshTokenTTL())
 	if _, err := tx.ExecContext(
 		ctx,
-		`INSERT INTO auth_refresh_tokens(user_id, token_hash, expires_at, created_at, last_used_at)
-		 VALUES ($1, $2, $3, $4, $4)`,
+		`INSERT INTO auth_refresh_tokens(user_id, device_id, device_session_version, token_hash, expires_at, created_at, last_used_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $6)`,
 		userID,
+		deviceID,
+		currentDeviceSessionVersion,
 		newHashed,
 		newExpiresAt,
 		now,
@@ -173,9 +222,13 @@ func (a *App) rotateRefreshToken(ctx context.Context, presentedToken string) (Au
 	}
 
 	return AuthContext{
-		UserID:   userID,
-		Username: username,
-		Role:     role,
+		UserID:               userID,
+		Username:             username,
+		Role:                 role,
+		DeviceID:             deviceID,
+		DeviceName:           deviceName,
+		DeviceSessionVersion: currentDeviceSessionVersion,
+		DeviceLastSeenAt:     now,
 	}, newToken, nil
 }
 
@@ -192,6 +245,23 @@ func (a *App) revokeRefreshToken(ctx context.Context, presentedToken string) err
 		    SET revoked_at = $2, last_used_at = $2
 		  WHERE token_hash = $1 AND revoked_at IS NULL`,
 		hashed,
+		now,
+	)
+	return err
+}
+
+func (a *App) revokeRefreshTokensForDevice(ctx context.Context, userID int64, deviceID string) error {
+	if userID <= 0 || normalizeDeviceID(deviceID) == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	_, err := a.db.ExecContext(
+		ctx,
+		`UPDATE auth_refresh_tokens
+		    SET revoked_at = $3, last_used_at = $3
+		  WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL`,
+		userID,
+		deviceID,
 		now,
 	)
 	return err

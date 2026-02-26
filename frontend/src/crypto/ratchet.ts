@@ -16,6 +16,7 @@ import {
 import { deleteSession, readSession, writeSession } from './store';
 import type {
   Identity,
+  RecipientAddress,
   RatchetHandshakeOutgoing,
   RatchetSessionRecord,
   RatchetSessionStatus,
@@ -225,8 +226,12 @@ function makeSkippedMessageID(remoteDH: JsonWebKey | null, n: number): string {
   return `${fp}:${n}`;
 }
 
-export async function ensureSelfSession(userID: number, identity: Identity): Promise<RatchetSessionRecord> {
-  const existing = await readSession(userID, userID);
+export async function ensureSelfSession(
+  userID: number,
+  localDeviceID: string,
+  identity: Identity,
+): Promise<RatchetSessionRecord> {
+  const existing = await readSession(userID, localDeviceID, userID, localDeviceID);
   if (existing && existing.status === 'ready') {
     if (
       signingKeyFingerprint(existing.peerIdentitySigningPublicKeyJwk)
@@ -246,9 +251,11 @@ export async function ensureSelfSession(userID: number, identity: Identity): Pro
   const chainRaw = await hmacSha256(rootRaw, `${SIGNAL_INITIATOR_CHAIN_INFO}:${crypto.randomUUID()}`);
 
   const session: RatchetSessionRecord = {
-    id: buildSessionID(userID, userID),
+    id: buildSessionID(userID, localDeviceID, userID, localDeviceID),
     userID,
+    localDeviceID,
     peerUserID: userID,
+    peerDeviceID: localDeviceID,
     status: 'ready',
     rootKey: toBase64(rootRaw),
     sendChainKey: toBase64(chainRaw),
@@ -381,7 +388,7 @@ export async function prepareSendWrappedKey(
   const payload = buildWrappedKeyHeader(session, wrapped);
   session.sendChainKey = nextChainKey;
   session.sendCount += 1;
-  if (session.pendingPreKey) {
+  if (session.pendingPreKey && session.sendCount >= 3) {
     session.pendingPreKey = null;
   }
   session.updatedAt = new Date().toISOString();
@@ -430,7 +437,9 @@ export async function deriveRatchetMessageKey(
 
 async function createInitiatorSession(
   localUserID: number,
+  localDeviceID: string,
   peerUserID: number,
+  peerDeviceID: string,
   identity: Identity,
   bundle: SignalPreKeyBundle,
 ): Promise<RatchetSessionRecord> {
@@ -444,9 +453,11 @@ async function createInitiatorSession(
   const chains = await deriveInitialChains(master);
 
   return {
-    id: buildSessionID(localUserID, peerUserID),
+    id: buildSessionID(localUserID, localDeviceID, peerUserID, peerDeviceID),
     userID: localUserID,
+    localDeviceID,
     peerUserID,
+    peerDeviceID,
     status: 'ready',
     rootKey: chains.rootKey,
     sendChainKey: chains.initiatorChain,
@@ -475,7 +486,9 @@ async function createInitiatorSession(
 
 export async function bootstrapSessionFromPreKeyMessage(
   localUserID: number,
+  localDeviceID: string,
   senderUserID: number,
+  senderDeviceID: string,
   identity: Identity,
   wrapped: WrappedKey,
 ): Promise<RatchetSessionRecord> {
@@ -502,9 +515,11 @@ export async function bootstrapSessionFromPreKeyMessage(
 
   const chains = await deriveInitialChains(master);
   const session: RatchetSessionRecord = {
-    id: buildSessionID(localUserID, senderUserID),
+    id: buildSessionID(localUserID, localDeviceID, senderUserID, senderDeviceID),
     userID: localUserID,
+    localDeviceID,
     peerUserID: senderUserID,
+    peerDeviceID: senderDeviceID,
     status: 'ready',
     rootKey: chains.rootKey,
     sendChainKey: chains.responderChain,
@@ -528,48 +543,116 @@ export async function bootstrapSessionFromPreKeyMessage(
 
 export async function ensureRatchetSessionsForRecipients(
   localUserID: number,
+  localDeviceID: string,
   identity: Identity,
-  recipientIDs: number[],
+  recipientUserIDs: number[],
   resolveSignalBundle: SignalBundleResolver,
 ): Promise<RatchetSessionStatus> {
   requireCryptoSupport();
 
-  const readyPeerIDs: number[] = [];
-  const pendingPeerIDs: number[] = [];
-  const dedupedRecipientIDs = [...new Set(recipientIDs
+  const readyRecipients: RecipientAddress[] = [];
+  const pendingUserIDs: number[] = [];
+  const dedupedRecipientIDs = [...new Set(recipientUserIDs
     .map((value) => Number(value))
     .filter((value) => Number.isFinite(value) && value > 0))];
 
-  for (const peerID of dedupedRecipientIDs) {
-    if (peerID === localUserID) {
-      await ensureSelfSession(localUserID, identity);
-      readyPeerIDs.push(peerID);
-      continue;
-    }
-
-    const existing = await readSession(localUserID, peerID);
-    if (existing?.status === 'ready') {
-      readyPeerIDs.push(peerID);
+  for (const peerUserID of dedupedRecipientIDs) {
+    if (peerUserID === localUserID) {
+      await ensureSelfSession(localUserID, localDeviceID, identity);
+      readyRecipients.push({ userID: localUserID, deviceID: localDeviceID });
+      try {
+        const localBundleList = await resolveSignalBundle(localUserID);
+        const localDeviceBundles = localBundleList.devices.filter((bundle) => {
+          if (typeof bundle.deviceId !== 'string') {
+            return false;
+          }
+          const deviceID = bundle.deviceId.trim();
+          return Boolean(deviceID) && deviceID !== localDeviceID;
+        });
+        let localPeerReady = 0;
+        for (const bundle of localDeviceBundles) {
+          const peerDeviceID = bundle.deviceId.trim();
+          try {
+            const existing = await readSession(localUserID, localDeviceID, localUserID, peerDeviceID);
+            if (existing?.status === 'ready') {
+              readyRecipients.push({ userID: localUserID, deviceID: peerDeviceID });
+              localPeerReady += 1;
+              continue;
+            }
+            const session = await createInitiatorSession(
+              localUserID,
+              localDeviceID,
+              localUserID,
+              peerDeviceID,
+              identity,
+              bundle,
+            );
+            await writeSession(session);
+            readyRecipients.push({ userID: localUserID, deviceID: peerDeviceID });
+            localPeerReady += 1;
+          } catch (err) {
+            console.warn(`[ratchet] failed to establish self-device session ${peerDeviceID}:`, err);
+          }
+        }
+        if (localDeviceBundles.length > 0 && localPeerReady === 0) {
+          pendingUserIDs.push(localUserID);
+        }
+      } catch (err) {
+        console.warn('[ratchet] failed to load local prekey bundles:', err);
+      }
       continue;
     }
 
     try {
-      const bundle = await resolveSignalBundle(peerID);
-      const session = await createInitiatorSession(localUserID, peerID, identity, bundle);
-      await writeSession(session);
-      readyPeerIDs.push(peerID);
+      const bundleList = await resolveSignalBundle(peerUserID);
+      const deviceBundles = bundleList.devices.filter((bundle) => typeof bundle.deviceId === 'string' && bundle.deviceId.trim());
+      if (deviceBundles.length === 0) {
+        pendingUserIDs.push(peerUserID);
+        continue;
+      }
+
+      const userReady: RecipientAddress[] = [];
+      for (const bundle of deviceBundles) {
+        const peerDeviceID = bundle.deviceId.trim();
+        const existing = await readSession(localUserID, localDeviceID, peerUserID, peerDeviceID);
+        if (existing?.status === 'ready') {
+          userReady.push({ userID: peerUserID, deviceID: peerDeviceID });
+          continue;
+        }
+        const session = await createInitiatorSession(
+          localUserID,
+          localDeviceID,
+          peerUserID,
+          peerDeviceID,
+          identity,
+          bundle,
+        );
+        await writeSession(session);
+        userReady.push({ userID: peerUserID, deviceID: peerDeviceID });
+      }
+
+      if (userReady.length === 0) {
+        pendingUserIDs.push(peerUserID);
+        continue;
+      }
+      readyRecipients.push(...userReady);
     } catch (err) {
       // Individual peer session failure should not block other recipients
-      console.warn(`[ratchet] failed to establish session with user ${peerID}:`, err);
-      pendingPeerIDs.push(peerID);
+      console.warn(`[ratchet] failed to establish session with user ${peerUserID}:`, err);
+      pendingUserIDs.push(peerUserID);
     }
   }
 
-  return { readyPeerIDs, pendingPeerIDs };
+  return { readyRecipients, pendingUserIDs };
 }
 
-export async function resetRatchetSession(localUserID: number, peerUserID: number): Promise<void> {
-  await deleteSession(localUserID, peerUserID);
+export async function resetRatchetSession(
+  localUserID: number,
+  localDeviceID: string,
+  peerUserID: number,
+  peerDeviceID: string,
+): Promise<void> {
+  await deleteSession(localUserID, localDeviceID, peerUserID, peerDeviceID);
 }
 
 export async function handleRatchetHandshakeFrame(

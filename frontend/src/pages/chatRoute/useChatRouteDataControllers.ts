@@ -27,7 +27,7 @@ type UseChatRouteDataControllersArgs = {
   handshakeTick: number;
   bumpHandshakeTick: () => void;
   wsConnected: boolean;
-  peers: Record<number, Peer>;
+  peers: Record<string, Peer>;
   sendJSON: (frame: unknown) => boolean;
   connect: (params: { roomID: number }) => void;
   disconnect: (reason?: string) => void;

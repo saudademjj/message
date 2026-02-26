@@ -87,6 +87,8 @@ func Run() {
 	mux.HandleFunc("/api/admin/users/", app.withAuth(app.withAdmin(app.handleAdminUserSubroutes)))
 	mux.HandleFunc("/api/rooms", app.withAuth(app.handleRooms))
 	mux.HandleFunc("/api/rooms/", app.withAuth(app.handleRoomSubroutes))
+	mux.HandleFunc("/api/devices", app.withAuth(app.handleDevices))
+	mux.HandleFunc("/api/devices/", app.withAuth(app.handleDeviceSubroutes))
 	mux.HandleFunc("/api/signal/prekey-bundle", app.withAuth(app.handleSignalPreKeyBundle))
 	mux.HandleFunc("/api/signal/prekey-bundle/", app.withAuth(app.handleSignalPreKeyBundleSubroutes))
 	mux.HandleFunc("/api/signal/safety-number/", app.withAuth(app.handleSignalSafetyNumberSubroutes))

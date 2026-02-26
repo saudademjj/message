@@ -43,7 +43,9 @@ export type PendingPreKeyState = {
 export type RatchetSessionRecord = {
   id: string;
   userID: number;
+  localDeviceID: string;
   peerUserID: number;
+  peerDeviceID: string;
   status: SessionStatus;
   rootKey: string;
   sendChainKey: string;
@@ -95,11 +97,12 @@ export type RatchetHandshakeOutgoing = {
 };
 
 export type RatchetSessionStatus = {
-  readyPeerIDs: number[];
-  pendingPeerIDs: number[];
+  readyRecipients: RecipientAddress[];
+  pendingUserIDs: number[];
 };
 
 export type SignalPreKeyBundle = {
+  deviceId: string;
   userId: number;
   username?: string;
   identityKeyJwk: JsonWebKey;
@@ -118,6 +121,13 @@ export type SignalPreKeyBundle = {
   updatedAt?: string;
 };
 
+export type SignalPreKeyBundleList = {
+  userId: number;
+  username?: string;
+  devices: SignalPreKeyBundle[];
+  updatedAt?: string;
+};
+
 export type SignalPreKeyBundleUpload = {
   identityKeyJwk: JsonWebKey;
   identitySigningPublicKeyJwk: JsonWebKey;
@@ -132,4 +142,9 @@ export type SignalPreKeyBundleUpload = {
   }>;
 };
 
-export type SignalBundleResolver = (userID: number) => Promise<SignalPreKeyBundle>;
+export type RecipientAddress = {
+  userID: number;
+  deviceID: string;
+};
+
+export type SignalBundleResolver = (userID: number) => Promise<SignalPreKeyBundleList>;

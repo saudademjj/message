@@ -435,7 +435,13 @@ async function hydrateSessionFromJWK(raw: unknown): Promise<RatchetSessionRecord
     return null;
   }
   const userID = Number(raw.userID);
+  const localDeviceID = typeof raw.localDeviceID === 'string' && raw.localDeviceID.trim()
+    ? raw.localDeviceID.trim()
+    : 'legacy-local';
   const peerUserID = Number(raw.peerUserID);
+  const peerDeviceID = typeof raw.peerDeviceID === 'string' && raw.peerDeviceID.trim()
+    ? raw.peerDeviceID.trim()
+    : 'legacy-peer';
   if (!Number.isFinite(userID) || userID <= 0 || !Number.isFinite(peerUserID) || peerUserID <= 0) {
     return null;
   }
@@ -476,7 +482,9 @@ async function hydrateSessionFromJWK(raw: unknown): Promise<RatchetSessionRecord
     return {
       id,
       userID: Math.floor(userID),
+      localDeviceID,
       peerUserID: Math.floor(peerUserID),
+      peerDeviceID,
       status: 'ready',
       rootKey,
       sendChainKey,
@@ -566,7 +574,9 @@ async function serializeSessionForStorage(record: RatchetSessionRecord): Promise
   return {
     id: record.id,
     userID: record.userID,
+    localDeviceID: record.localDeviceID,
     peerUserID: record.peerUserID,
+    peerDeviceID: record.peerDeviceID,
     rootKey: record.rootKey,
     sendChainKey: record.sendChainKey,
     recvChainKey: record.recvChainKey,
@@ -594,7 +604,13 @@ export function normalizeSession(raw: unknown): RatchetSessionRecord | null {
     return null;
   }
   const userID = Number(raw.userID);
+  const localDeviceID = typeof raw.localDeviceID === 'string' && raw.localDeviceID.trim()
+    ? raw.localDeviceID.trim()
+    : 'legacy-local';
   const peerUserID = Number(raw.peerUserID);
+  const peerDeviceID = typeof raw.peerDeviceID === 'string' && raw.peerDeviceID.trim()
+    ? raw.peerDeviceID.trim()
+    : 'legacy-peer';
   if (!Number.isFinite(userID) || userID <= 0 || !Number.isFinite(peerUserID) || peerUserID <= 0) {
     return null;
   }
@@ -624,7 +640,9 @@ export function normalizeSession(raw: unknown): RatchetSessionRecord | null {
   return {
     id,
     userID: Math.floor(userID),
+    localDeviceID,
     peerUserID: Math.floor(peerUserID),
+    peerDeviceID,
     status: 'ready',
     rootKey,
     sendChainKey,
@@ -735,8 +753,13 @@ export async function writeIdentityRecord(record: PersistedIdentityRecord): Prom
   }
 }
 
-export async function readSession(userID: number, peerUserID: number): Promise<RatchetSessionRecord | null> {
-  const sessionID = buildSessionID(userID, peerUserID);
+export async function readSession(
+  userID: number,
+  localDeviceID: string,
+  peerUserID: number,
+  peerDeviceID: string,
+): Promise<RatchetSessionRecord | null> {
+  const sessionID = buildSessionID(userID, localDeviceID, peerUserID, peerDeviceID);
   // Check in-memory cache first (protects against IDB write failures)
   const cached = sessionCache.get(sessionID);
   if (cached) {
@@ -819,8 +842,13 @@ export async function writeSession(record: RatchetSessionRecord): Promise<void> 
   }
 }
 
-export async function deleteSession(userID: number, peerUserID: number): Promise<void> {
-  const sessionID = buildSessionID(userID, peerUserID);
+export async function deleteSession(
+  userID: number,
+  localDeviceID: string,
+  peerUserID: number,
+  peerDeviceID: string,
+): Promise<void> {
+  const sessionID = buildSessionID(userID, localDeviceID, peerUserID, peerDeviceID);
   sessionCache.delete(sessionID);
   deleteLocalMirrorRaw(localMirrorSessionKey(sessionID));
   let db: IDBDatabase;

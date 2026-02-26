@@ -47,8 +47,30 @@ export function createKeyID(): string {
   return `key-${Date.now()}-${random}`;
 }
 
-export function buildSessionID(userID: number, peerUserID: number): string {
-  return `${userID}:${peerUserID}`;
+export function buildRecipientAddress(userID: number, deviceID: string): string {
+  return `${Math.floor(userID)}:${deviceID}`;
+}
+
+export function parseRecipientAddress(address: string): { userID: number; deviceID: string } | null {
+  const parts = address.split(':');
+  if (parts.length < 2) {
+    return null;
+  }
+  const userID = Number(parts[0]);
+  const deviceID = parts.slice(1).join(':').trim();
+  if (!Number.isFinite(userID) || userID <= 0 || !deviceID) {
+    return null;
+  }
+  return { userID: Math.floor(userID), deviceID };
+}
+
+export function buildSessionID(
+  userID: number,
+  localDeviceID: string,
+  peerUserID: number,
+  peerDeviceID: string,
+): string {
+  return `${Math.floor(userID)}:${localDeviceID}:${Math.floor(peerUserID)}:${peerDeviceID}`;
 }
 
 export function isObject(value: unknown): value is Record<string, unknown> {

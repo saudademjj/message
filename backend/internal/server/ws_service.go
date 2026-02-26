@@ -55,6 +55,15 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "token role mismatch"})
 		return
 	}
+	device, err := a.validateDeviceClaim(ctx, claims.UserID, claims.DeviceID, claims.DeviceSessionVersion)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, errInvalidIdentity) {
+			respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "device session expired"})
+			return
+		}
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to validate device session"})
+		return
+	}
 
 	if err := a.ensureRoomExists(ctx, roomID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -81,12 +90,14 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &Client{
-		app:      a,
-		conn:     conn,
-		send:     make(chan []byte, 256),
-		userID:   claims.UserID,
-		username: claims.Username,
-		roomID:   roomID,
+		app:        a,
+		conn:       conn,
+		send:       make(chan []byte, 256),
+		userID:     claims.UserID,
+		username:   claims.Username,
+		deviceID:   device.DeviceID,
+		deviceName: device.DeviceName,
+		roomID:     roomID,
 	}
 
 	peers := a.hub.AddClient(client)
@@ -106,9 +117,10 @@ func (c *Client) readPump() {
 	defer func() {
 		c.app.hub.RemoveClient(c)
 		if payload, err := json.Marshal(map[string]any{
-			"type":   "peer_left",
-			"roomId": c.roomID,
-			"userId": c.userID,
+			"type":     "peer_left",
+			"roomId":   c.roomID,
+			"userId":   c.userID,
+			"deviceId": c.deviceID,
 		}); err == nil {
 			c.app.hub.Broadcast(c.roomID, payload)
 		}
@@ -174,6 +186,8 @@ func (c *Client) readPump() {
 				"roomId":              c.roomID,
 				"userId":              c.userID,
 				"username":            c.username,
+				"deviceId":            c.deviceID,
+				"deviceName":          c.deviceName,
 				"publicKeyJwk":        json.RawMessage(incoming.PublicKeyJWK),
 				"signingPublicKeyJwk": json.RawMessage(incoming.SigningPublicKeyJWK),
 			}); err == nil {
@@ -185,6 +199,13 @@ func (c *Client) readPump() {
 				continue
 			}
 			if incoming.Signature == "" {
+				continue
+			}
+			senderDeviceID := normalizeDeviceID(incoming.SenderDeviceID)
+			if senderDeviceID == "" {
+				senderDeviceID = c.deviceID
+			}
+			if senderDeviceID != c.deviceID {
 				continue
 			}
 			if len(incoming.SenderSigningPubJWK) == 0 || !json.Valid(incoming.SenderSigningPubJWK) {
@@ -216,11 +237,11 @@ func (c *Client) readPump() {
 				SenderSigningPubJWK: incoming.SenderSigningPubJWK,
 				Signature:           incoming.Signature,
 				ContentType:         incoming.ContentType,
-				SenderDeviceID:      incoming.SenderDeviceID,
+				SenderDeviceID:      senderDeviceID,
 				EncryptionScheme:    incoming.EncryptionScheme,
 			}
 			if payload.Version <= 0 {
-				payload.Version = 1
+				payload.Version = 3
 			}
 			if err := verifyCipherSignature(payload); err != nil {
 				logger.Warn(
@@ -429,6 +450,14 @@ func (c *Client) readPump() {
 				cancel()
 				continue
 			}
+			senderDeviceID := normalizeDeviceID(incoming.SenderDeviceID)
+			if senderDeviceID == "" {
+				senderDeviceID = c.deviceID
+			}
+			if senderDeviceID != c.deviceID {
+				cancel()
+				continue
+			}
 
 			payload := CipherPayload{
 				Version:             incoming.Version,
@@ -439,11 +468,11 @@ func (c *Client) readPump() {
 				SenderSigningPubJWK: incoming.SenderSigningPubJWK,
 				Signature:           incoming.Signature,
 				ContentType:         incoming.ContentType,
-				SenderDeviceID:      incoming.SenderDeviceID,
+				SenderDeviceID:      senderDeviceID,
 				EncryptionScheme:    incoming.EncryptionScheme,
 			}
 			if payload.Version <= 0 {
-				payload.Version = 1
+				payload.Version = 3
 			}
 			if err := verifyCipherSignature(payload); err != nil {
 				cancel()
@@ -570,10 +599,17 @@ func (c *Client) readPump() {
 				"messageId":    incoming.MessageID,
 				"fromUserId":   c.userID,
 				"fromUsername": c.username,
+				"fromDeviceId": c.deviceID,
 				"toUserId":     senderID,
+				"toDeviceId":   normalizeDeviceID(incoming.ToDeviceID),
 				"action":       action,
 			}); err == nil {
-				c.app.hub.Unicast(c.roomID, senderID, payload)
+				targetDeviceID := normalizeDeviceID(incoming.ToDeviceID)
+				if targetDeviceID != "" {
+					c.app.hub.UnicastToDevice(c.roomID, senderID, targetDeviceID, payload)
+				} else {
+					c.app.hub.Unicast(c.roomID, senderID, payload)
+				}
 			}
 
 		case "decrypt_recovery_payload":
@@ -584,6 +620,13 @@ func (c *Client) readPump() {
 				continue
 			}
 			if incoming.Signature == "" {
+				continue
+			}
+			senderDeviceID := normalizeDeviceID(incoming.SenderDeviceID)
+			if senderDeviceID == "" {
+				senderDeviceID = c.deviceID
+			}
+			if senderDeviceID != c.deviceID {
 				continue
 			}
 			if len(incoming.SenderSigningPubJWK) == 0 || !json.Valid(incoming.SenderSigningPubJWK) {
@@ -614,11 +657,11 @@ func (c *Client) readPump() {
 				SenderSigningPubJWK: incoming.SenderSigningPubJWK,
 				Signature:           incoming.Signature,
 				ContentType:         incoming.ContentType,
-				SenderDeviceID:      incoming.SenderDeviceID,
+				SenderDeviceID:      senderDeviceID,
 				EncryptionScheme:    incoming.EncryptionScheme,
 			}
 			if payload.Version <= 0 {
-				payload.Version = 1
+				payload.Version = 3
 			}
 			if err := verifyCipherSignature(payload); err != nil {
 				logger.Warn(
@@ -660,10 +703,17 @@ func (c *Client) readPump() {
 				"messageId":    incoming.MessageID,
 				"fromUserId":   c.userID,
 				"fromUsername": c.username,
+				"fromDeviceId": c.deviceID,
 				"toUserId":     incoming.ToUserID,
+				"toDeviceId":   normalizeDeviceID(incoming.ToDeviceID),
 				"payload":      payload,
 			}); err == nil {
-				c.app.hub.Unicast(c.roomID, incoming.ToUserID, out)
+				targetDeviceID := normalizeDeviceID(incoming.ToDeviceID)
+				if targetDeviceID != "" {
+					c.app.hub.UnicastToDevice(c.roomID, incoming.ToUserID, targetDeviceID, out)
+				} else {
+					c.app.hub.Unicast(c.roomID, incoming.ToUserID, out)
+				}
 			}
 		}
 	}
