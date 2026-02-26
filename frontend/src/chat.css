@@ -473,9 +473,10 @@ mark.search-highlight {
     bottom: 100%;
     right: 0;
     margin-bottom: 6px;
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
     gap: 4px;
     background: var(--bg-surface-strong);
     padding: 6px 8px;
@@ -485,6 +486,14 @@ mark.search-highlight {
     z-index: 20;
     animation: fade-slide-up 0.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
     max-width: min(420px, calc(100vw - 32px));
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.bubble-actions-floating::-webkit-scrollbar {
+    display: none;
 }
 
 .bubble-action-btn {
@@ -498,6 +507,7 @@ mark.search-highlight {
     color: var(--text-primary);
     transition: background 0.15s, color 0.15s, border-color 0.15s;
     white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 .bubble-action-btn:hover {
