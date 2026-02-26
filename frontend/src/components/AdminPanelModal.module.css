@@ -1,0 +1,151 @@
+.shell {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  border: none;
+  border-radius: 0;
+}
+
+.card {
+  width: min(1080px, 100%);
+  max-height: calc(100dvh - 40px);
+  z-index: 1;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+  padding: 24px;
+  animation: adminModalEnter 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes adminModalEnter {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.close {
+  padding: 8px 14px;
+  min-height: 34px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) 1fr;
+  gap: 16px;
+  min-height: 0;
+}
+
+.createForm,
+.userPanel {
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface-strong);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+}
+
+.createForm {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.createForm h4,
+.userPanel h4 {
+  margin: 0;
+}
+
+.userPanel {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 12px;
+  min-height: 0;
+}
+
+.userPanel :global(.managed-list) {
+  max-height: none;
+}
+
+.userHead {
+  display: grid;
+  gap: 10px;
+}
+
+.emptyState {
+  margin: 0;
+  color: var(--text-secondary);
+  padding: 16px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+}
+
+.paginationActions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.paginationActions :global(.ghost-btn) {
+  min-height: 32px;
+  padding: 0 12px;
+}
+
+@media (max-width: 900px) {
+  .card {
+    max-height: calc(100dvh - 24px);
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .userPanel :global(.managed-list) {
+    max-height: 34vh;
+  }
+}
+
+@media (max-width: 640px) {
+  .shell {
+    padding: 10px;
+  }
+
+  .card {
+    max-height: calc(100dvh - 20px);
+  }
+
+  .pagination {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
