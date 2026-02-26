@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+**/node_modules
+**/.npm-cache
+**/dist
+.DS_Store
+**/.DS_Store
+*.log
+backend/.build/
+backend/bin/
+backend/server
+backend/e2ee-chat-backend-linux-amd64
+bin/e2ee-chat-backend
