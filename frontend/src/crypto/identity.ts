@@ -4,7 +4,7 @@ import {
   ONE_TIME_PREKEY_TARGET,
   SIGNED_PREKEY_HISTORY_LIMIT,
 } from './constants';
-import { readIdentityRecord, writeIdentityRecord } from './store';
+import { deleteAllSessionsForUser, readIdentityRecord, writeIdentityRecord } from './store';
 import type {
   Identity,
   PersistedIdentityRecord,
@@ -140,6 +140,23 @@ function signedPreKeyAgeMs(entry: PersistedSignedPreKey): number {
   return Math.max(0, Date.now() - parsed);
 }
 
+function hasPersistablePrivateKeys(record: PersistedIdentityRecord): boolean {
+  if (!record.identityPrivateKey.extractable || !record.signingPrivateKey.extractable) {
+    return false;
+  }
+  for (const signedPreKey of record.signedPreKeys) {
+    if (!signedPreKey.privateKey.extractable) {
+      return false;
+    }
+  }
+  for (const oneTimePreKey of record.oneTimePreKeys) {
+    if (!oneTimePreKey.privateKey.extractable) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function toIdentity(record: PersistedIdentityRecord): Identity {
   const active = record.signedPreKeys.find((entry) => entry.keyID === record.activeSignedPreKeyID)
     ?? record.signedPreKeys[record.signedPreKeys.length - 1];
@@ -194,6 +211,15 @@ async function ensureIdentityRecord(
 ): Promise<{ record: PersistedIdentityRecord; changed: boolean }> {
   const existing = await readIdentityRecord(userID);
   if (!existing) {
+    await deleteAllSessionsForUser(userID);
+    return {
+      record: await createIdentityRecord(userID),
+      changed: true,
+    };
+  }
+
+  if (!hasPersistablePrivateKeys(existing)) {
+    await deleteAllSessionsForUser(userID);
     return {
       record: await createIdentityRecord(userID),
       changed: true,

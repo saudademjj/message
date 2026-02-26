@@ -16,6 +16,94 @@ import { buildSessionID, isCryptoKey, isObject } from './utils';
 // In-memory caches — protects against silent IDB write failures (common on mobile Safari)
 const sessionCache = new Map<string, RatchetSessionRecord>();
 const identityCache = new Map<number, PersistedIdentityRecord>();
+const LOCAL_MIRROR_IDENTITY_PREFIX = `${SECURE_DB_NAME}:identity:`;
+const LOCAL_MIRROR_SESSION_PREFIX = `${SECURE_DB_NAME}:session:`;
+
+function getLocalStorageSafe(): Storage | null {
+  try {
+    if (typeof window === 'undefined' || !('localStorage' in window)) {
+      return null;
+    }
+    const storage = window.localStorage;
+    if (!storage) {
+      return null;
+    }
+    return storage;
+  } catch {
+    return null;
+  }
+}
+
+function localMirrorIdentityKey(userID: number): string {
+  return `${LOCAL_MIRROR_IDENTITY_PREFIX}${Math.floor(userID)}`;
+}
+
+function localMirrorSessionKey(sessionID: string): string {
+  return `${LOCAL_MIRROR_SESSION_PREFIX}${sessionID}`;
+}
+
+function readLocalMirrorRaw(key: string): unknown | null {
+  const storage = getLocalStorageSafe();
+  if (!storage) {
+    return null;
+  }
+  try {
+    const raw = storage.getItem(key);
+    if (!raw) {
+      return null;
+    }
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalMirrorRaw(key: string, value: unknown): void {
+  const storage = getLocalStorageSafe();
+  if (!storage) {
+    return;
+  }
+  try {
+    storage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore localStorage quota or availability errors.
+  }
+}
+
+function deleteLocalMirrorRaw(key: string): void {
+  const storage = getLocalStorageSafe();
+  if (!storage) {
+    return;
+  }
+  try {
+    storage.removeItem(key);
+  } catch {
+    // Ignore localStorage availability errors.
+  }
+}
+
+function deleteLocalSessionMirrorForUser(userID: number): void {
+  const storage = getLocalStorageSafe();
+  if (!storage) {
+    return;
+  }
+  const prefix = `${LOCAL_MIRROR_SESSION_PREFIX}${Math.floor(userID)}:`;
+  const keysToDelete: string[] = [];
+  try {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (!key || !key.startsWith(prefix)) {
+        continue;
+      }
+      keysToDelete.push(key);
+    }
+    for (const key of keysToDelete) {
+      storage.removeItem(key);
+    }
+  } catch {
+    // Ignore localStorage availability errors.
+  }
+}
 
 function isJWKLike(value: unknown): value is JsonWebKey {
   return isObject(value) && typeof value.kty === 'string';
@@ -570,10 +658,16 @@ export async function readIdentityRecord(userID: number): Promise<PersistedIdent
   if (cached) {
     return cached;
   }
+  const mirrorKey = localMirrorIdentityKey(userID);
   let db: IDBDatabase;
   try {
     db = await openSecureDB();
   } catch {
+    const mirrored = await hydrateIdentityRecordFromJWK(readLocalMirrorRaw(mirrorKey), userID);
+    if (mirrored) {
+      identityCache.set(userID, mirrored);
+      return mirrored;
+    }
     return null;
   }
   try {
@@ -583,12 +677,19 @@ export async function readIdentityRecord(userID: number): Promise<PersistedIdent
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error('failed to read identity'));
     });
-    const result = normalizeIdentityRecord(raw, userID) ?? await hydrateIdentityRecordFromJWK(raw, userID);
+    const result = normalizeIdentityRecord(raw, userID)
+      ?? await hydrateIdentityRecordFromJWK(raw, userID)
+      ?? await hydrateIdentityRecordFromJWK(readLocalMirrorRaw(mirrorKey), userID);
     if (result) {
       identityCache.set(userID, result);
     }
     return result;
   } catch {
+    const mirrored = await hydrateIdentityRecordFromJWK(readLocalMirrorRaw(mirrorKey), userID);
+    if (mirrored) {
+      identityCache.set(userID, mirrored);
+      return mirrored;
+    }
     return null;
   } finally {
     db.close();
@@ -601,6 +702,10 @@ export async function writeIdentityRecord(record: PersistedIdentityRecord): Prom
   }
   // Always update in-memory cache first (survives IDB failures)
   identityCache.set(record.userID, record);
+  const serializedForMirror = await serializeIdentityRecordForStorage(record);
+  if (serializedForMirror) {
+    writeLocalMirrorRaw(localMirrorIdentityKey(record.userID), serializedForMirror);
+  }
   let db: IDBDatabase;
   try {
     db = await openSecureDB();
@@ -618,11 +723,10 @@ export async function writeIdentityRecord(record: PersistedIdentityRecord): Prom
       await putValue(record);
       return;
     } catch {
-      const serialized = await serializeIdentityRecordForStorage(record);
-      if (!serialized) {
+      if (!serializedForMirror) {
         return;
       }
-      await putValue(serialized);
+      await putValue(serializedForMirror);
     }
   } catch {
     // IDB write failed — identity works in-memory for this session
@@ -638,10 +742,16 @@ export async function readSession(userID: number, peerUserID: number): Promise<R
   if (cached) {
     return cached;
   }
+  const mirrorKey = localMirrorSessionKey(sessionID);
   let db: IDBDatabase;
   try {
     db = await openSecureDB();
   } catch {
+    const mirrored = await hydrateSessionFromJWK(readLocalMirrorRaw(mirrorKey));
+    if (mirrored) {
+      sessionCache.set(sessionID, mirrored);
+      return mirrored;
+    }
     return null;
   }
   try {
@@ -651,12 +761,19 @@ export async function readSession(userID: number, peerUserID: number): Promise<R
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error('failed to read ratchet session'));
     });
-    const result = normalizeSession(raw) ?? await hydrateSessionFromJWK(raw);
+    const result = normalizeSession(raw)
+      ?? await hydrateSessionFromJWK(raw)
+      ?? await hydrateSessionFromJWK(readLocalMirrorRaw(mirrorKey));
     if (result) {
       sessionCache.set(sessionID, result);
     }
     return result;
   } catch {
+    const mirrored = await hydrateSessionFromJWK(readLocalMirrorRaw(mirrorKey));
+    if (mirrored) {
+      sessionCache.set(sessionID, mirrored);
+      return mirrored;
+    }
     return null;
   } finally {
     db.close();
@@ -669,6 +786,10 @@ export async function writeSession(record: RatchetSessionRecord): Promise<void> 
   }
   // Always update in-memory cache first (survives IDB failures)
   sessionCache.set(record.id, record);
+  const serializedForMirror = await serializeSessionForStorage(record);
+  if (serializedForMirror) {
+    writeLocalMirrorRaw(localMirrorSessionKey(record.id), serializedForMirror);
+  }
   let db: IDBDatabase;
   try {
     db = await openSecureDB();
@@ -686,11 +807,10 @@ export async function writeSession(record: RatchetSessionRecord): Promise<void> 
       await putValue(record);
       return;
     } catch {
-      const serialized = await serializeSessionForStorage(record);
-      if (!serialized) {
+      if (!serializedForMirror) {
         return;
       }
-      await putValue(serialized);
+      await putValue(serializedForMirror);
     }
   } catch {
     // IDB write failed — session works in-memory for this session
@@ -702,6 +822,7 @@ export async function writeSession(record: RatchetSessionRecord): Promise<void> 
 export async function deleteSession(userID: number, peerUserID: number): Promise<void> {
   const sessionID = buildSessionID(userID, peerUserID);
   sessionCache.delete(sessionID);
+  deleteLocalMirrorRaw(localMirrorSessionKey(sessionID));
   let db: IDBDatabase;
   try {
     db = await openSecureDB();
@@ -717,6 +838,55 @@ export async function deleteSession(userID: number, peerUserID: number): Promise
     });
   } catch {
     // Ignore IDB delete failures.
+  } finally {
+    db.close();
+  }
+}
+
+export async function deleteAllSessionsForUser(userID: number): Promise<void> {
+  const userPrefix = `${Math.floor(userID)}:`;
+  for (const sessionID of [...sessionCache.keys()]) {
+    if (sessionID.startsWith(userPrefix)) {
+      sessionCache.delete(sessionID);
+    }
+  }
+  deleteLocalSessionMirrorForUser(userID);
+
+  let db: IDBDatabase;
+  try {
+    db = await openSecureDB();
+  } catch {
+    return;
+  }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SESSION_STORE, 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error('failed to clear user sessions'));
+      const store = tx.objectStore(SESSION_STORE);
+      const cursorRequest = store.openCursor();
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) {
+          return;
+        }
+        const candidate = cursor.value as { id?: unknown; userID?: unknown };
+        const cursorID = typeof candidate?.id === 'string' ? candidate.id : '';
+        const cursorUserID = Number(candidate?.userID);
+        if (
+          (Number.isFinite(cursorUserID) && Math.floor(cursorUserID) === Math.floor(userID))
+          || cursorID.startsWith(userPrefix)
+        ) {
+          cursor.delete();
+        }
+        cursor.continue();
+      };
+      cursorRequest.onerror = () => {
+        reject(cursorRequest.error ?? new Error('failed to iterate session store'));
+      };
+    });
+  } catch {
+    // Ignore IDB cleanup failures.
   } finally {
     db.close();
   }

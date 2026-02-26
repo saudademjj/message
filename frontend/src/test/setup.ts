@@ -34,6 +34,42 @@ if (!globalThis.window.indexedDB) {
   });
 }
 
+if (
+  !('localStorage' in globalThis.window)
+  || typeof globalThis.window.localStorage?.getItem !== 'function'
+  || typeof globalThis.window.localStorage?.setItem !== 'function'
+  || typeof globalThis.window.localStorage?.removeItem !== 'function'
+  || typeof globalThis.window.localStorage?.clear !== 'function'
+) {
+  const store = new Map<string, string>();
+  Object.defineProperty(globalThis.window, 'localStorage', {
+    value: {
+      get length() {
+        return store.size;
+      },
+      clear() {
+        store.clear();
+      },
+      getItem(key: string) {
+        return store.has(key) ? store.get(key)! : null;
+      },
+      key(index: number) {
+        if (index < 0 || index >= store.size) {
+          return null;
+        }
+        return [...store.keys()][index] ?? null;
+      },
+      removeItem(key: string) {
+        store.delete(key);
+      },
+      setItem(key: string, value: string) {
+        store.set(key, String(value));
+      },
+    } as Storage,
+    configurable: true,
+  });
+}
+
 if (!globalThis.btoa) {
   Object.defineProperty(globalThis, 'btoa', {
     value: (input: string) => Buffer.from(input, 'binary').toString('base64'),
