@@ -474,6 +474,7 @@ mark.search-highlight {
     right: 0;
     margin-bottom: 6px;
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: 4px;
     background: var(--bg-surface-strong);
@@ -483,11 +484,7 @@ mark.search-highlight {
     border: 1px solid var(--border-color);
     z-index: 20;
     animation: fade-slide-up 0.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
-
-.bubble.own .bubble-actions-floating {
-    right: auto;
-    left: 0;
+    max-width: min(420px, calc(100vw - 32px));
 }
 
 .bubble-action-btn {
@@ -667,17 +664,6 @@ mark.search-highlight {
 
 .bubble.own .markdown-body a {
     color: rgba(255, 255, 255, 0.95);
-}
-
-.bubble.own .bubble-action-btn {
-    background: rgba(255, 255, 255, 0.25);
-    border-color: rgba(255, 255, 255, 0.3);
-    color: rgba(255, 255, 255, 0.95);
-}
-
-.bubble.own .bubble-action-btn:hover {
-    background: rgba(255, 255, 255, 0.4);
-    border-color: rgba(255, 255, 255, 0.5);
 }
 
 /* Empty State */
@@ -1125,6 +1111,17 @@ mark.search-highlight {
     color: #fca5a5;
 }
 
+:root[data-theme='dark'] .bubble.own .bubble-action-btn {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.28);
+    color: rgba(255, 255, 255, 0.95);
+}
+
+:root[data-theme='dark'] .bubble.own .bubble-action-btn:hover {
+    background: rgba(255, 255, 255, 0.34);
+    border-color: rgba(255, 255, 255, 0.42);
+}
+
 @media (prefers-color-scheme: dark) {
     :root:not([data-theme='light']) .toast.error {
         border-left-color: rgba(239, 68, 68, 0.6);
@@ -1158,6 +1155,17 @@ mark.search-highlight {
 
     :root:not([data-theme='light']) .bubble.failed .bubble-text {
         color: #fca5a5;
+    }
+
+    :root:not([data-theme='light']) .bubble.own .bubble-action-btn {
+        background: rgba(255, 255, 255, 0.2);
+        border-color: rgba(255, 255, 255, 0.28);
+        color: rgba(255, 255, 255, 0.95);
+    }
+
+    :root:not([data-theme='light']) .bubble.own .bubble-action-btn:hover {
+        background: rgba(255, 255, 255, 0.34);
+        border-color: rgba(255, 255, 255, 0.42);
     }
 }
 
