@@ -257,12 +257,12 @@
 }
 
 .bubble.failed .bubble-main {
-    border: 1px solid rgba(239, 68, 68, 0.25);
-    background: rgba(239, 68, 68, 0.04);
+    border: 1px solid rgba(185, 28, 28, 0.24);
+    background: #fff5f4;
 }
 
 .bubble.own.failed .bubble-main {
-    color: var(--text-primary);
+    color: #111b21;
 }
 
 .bubble.own.failed .bubble-meta-footer time {
@@ -273,8 +273,46 @@
     animation: bubble-jump-highlight 1.6s ease both;
 }
 
-.bubble.failed .bubble-text {
-    color: #b91c1c;
+.decrypt-failed-alert {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+}
+
+.decrypt-failed-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.67rem;
+    font-weight: 700;
+    line-height: 1;
+    color: #b42318;
+    background: rgba(180, 35, 24, 0.12);
+    border: 1px solid rgba(180, 35, 24, 0.22);
+    margin-top: 1px;
+}
+
+.decrypt-failed-copy {
+    min-width: 0;
+}
+
+.decrypt-failed-title {
+    margin: 0;
+    font-size: 0.74rem;
+    line-height: 1.25;
+    font-weight: 600;
+    color: #7a271f;
+}
+
+.decrypt-failed-desc {
+    margin: 2px 0 0;
+    font-size: 0.74rem;
+    line-height: 1.32;
+    color: #9a4a43;
 }
 
 @keyframes message-pop-in {
@@ -1396,7 +1434,22 @@ mark.search-highlight {
     color: #fca5a5;
 }
 
-:root[data-theme='dark'] .bubble.failed .bubble-text {
+:root[data-theme='dark'] .bubble.failed .bubble-main {
+    border-color: rgba(248, 113, 113, 0.42);
+    background: rgba(127, 29, 29, 0.2);
+}
+
+:root[data-theme='dark'] .decrypt-failed-icon {
+    color: #fecaca;
+    background: rgba(248, 113, 113, 0.18);
+    border-color: rgba(248, 113, 113, 0.38);
+}
+
+:root[data-theme='dark'] .decrypt-failed-title {
+    color: #fee2e2;
+}
+
+:root[data-theme='dark'] .decrypt-failed-desc {
     color: #fca5a5;
 }
 
@@ -1631,7 +1684,22 @@ mark.search-highlight {
         color: #fca5a5;
     }
 
-    :root:not([data-theme='light']) .bubble.failed .bubble-text {
+    :root:not([data-theme='light']) .bubble.failed .bubble-main {
+        border-color: rgba(248, 113, 113, 0.42);
+        background: rgba(127, 29, 29, 0.2);
+    }
+
+    :root:not([data-theme='light']) .decrypt-failed-icon {
+        color: #fecaca;
+        background: rgba(248, 113, 113, 0.18);
+        border-color: rgba(248, 113, 113, 0.38);
+    }
+
+    :root:not([data-theme='light']) .decrypt-failed-title {
+        color: #fee2e2;
+    }
+
+    :root:not([data-theme='light']) .decrypt-failed-desc {
         color: #fca5a5;
     }
 }

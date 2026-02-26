@@ -51,6 +51,20 @@ function isEmojiOnly(text: string): boolean {
   return EMOJI_ONLY_RE.test(trimmed);
 }
 
+function normalizeDecryptFailedMessage(body: string): string {
+  const trimmed = body.trim();
+  if (trimmed === '[无法解密：你不是此消息的接收者或密钥不匹配]') {
+    return '这条消息未对当前设备加密，暂时无法查看。';
+  }
+  if (trimmed === '[无法解密：本地身份未就绪]') {
+    return '本地安全身份正在初始化，请稍后再试。';
+  }
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
 export const ChatTimeline = memo(function ChatTimeline({
   timelineItems,
   messagesCount,
@@ -352,7 +366,13 @@ export const ChatTimeline = memo(function ChatTimeline({
                     ) : (
                       <div className="bubble-body">
                         {message.decryptState === 'failed' ? (
-                          <p className="bubble-text decrypt-failed">[!] {parsed.body}</p>
+                          <div className="decrypt-failed-alert" role="note" aria-label="消息暂时无法解密">
+                            <span className="decrypt-failed-icon" aria-hidden="true">!</span>
+                            <div className="decrypt-failed-copy">
+                              <p className="decrypt-failed-title">当前设备无法解密该消息</p>
+                              <p className="decrypt-failed-desc">{normalizeDecryptFailedMessage(parsed.body)}</p>
+                            </div>
+                          </div>
                         ) : (
                           <div
                             className="markdown-body"

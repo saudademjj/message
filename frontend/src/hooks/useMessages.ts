@@ -553,7 +553,7 @@ export function useMessages({
       if (!auth || !identity) {
         return {
           ...message,
-          plaintext: '[无法解密：本地身份未就绪]',
+          plaintext: '本地安全身份正在初始化，请稍后再试。',
           decryptState: 'failed',
           pendingWidthPx,
         };
@@ -579,7 +579,7 @@ export function useMessages({
       } catch {
         return {
           ...message,
-          plaintext: '[无法解密：你不是此消息的接收者或密钥不匹配]',
+          plaintext: '这条消息未对当前设备加密，暂时无法查看。',
           decryptState: 'failed',
           pendingWidthPx,
         };
