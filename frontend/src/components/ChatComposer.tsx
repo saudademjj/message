@@ -126,11 +126,16 @@ export const ChatComposer = memo(function ChatComposer({
     if (!triggerRef.current) return null;
 
     const rect = triggerRef.current.getBoundingClientRect();
-    const chatMainRect = triggerRef.current.closest('.chat-main')?.getBoundingClientRect();
+    const chatMainRect = triggerRef.current.closest('.chat-main')?.getBoundingClientRect() ?? null;
     const viewportHeight = window.innerHeight;
     const viewportWidth = window.innerWidth;
     const isMobile = viewportWidth <= 640;
-    const pickerWidth = Math.max(220, Math.min(320, viewportWidth - 24));
+    const maxPickerWidthFromViewport = Math.max(180, viewportWidth - 24);
+    const maxPickerWidthFromLayout = !isMobile && chatMainRect
+      ? Math.max(180, chatMainRect.width - 24)
+      : maxPickerWidthFromViewport;
+    const maxPickerWidth = Math.min(maxPickerWidthFromViewport, maxPickerWidthFromLayout);
+    const pickerWidth = Math.min(320, maxPickerWidth);
     const pickerHeight = Math.max(220, Math.min(400, viewportHeight - 24));
 
     let top: number;
@@ -160,7 +165,7 @@ export const ChatComposer = memo(function ChatComposer({
       const maxLeft = Math.min(maxLeftInViewport, maxLeftInChatMain);
 
       if (maxLeft <= minLeft) {
-        left = Math.max(12, Math.min(rect.left, maxLeftInViewport));
+        left = minLeft;
       } else {
         left = Math.max(minLeft, Math.min(rect.left, maxLeft));
       }
