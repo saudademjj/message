@@ -5,6 +5,23 @@
 - 前端: React + Web Crypto API（在浏览器端加解密）
 - 数据库: PostgreSQL（仅保存密文 payload）
 
+## 快速上手（30 秒）
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+启动后默认访问：
+
+- 前端：`http://localhost:8088`
+- 后端健康检查：`http://localhost:8081/healthz`
+
+## 运行模式说明
+
+- `Docker Compose`：推荐默认方式，数据库与后端连接串由 `docker-compose.yml` 自动组装，不需要手动填写 `DATABASE_URL`。
+- `宿主机部署`：手动启动后端时，需要自行设置 `DATABASE_URL`（生产建议 TLS）。
+
 ## 目录结构
 
 - `backend/cmd/server/main.go`: Go 服务入口
@@ -40,7 +57,7 @@ cp .env.example .env
 
 请在 `.env` 中至少设置以下变量：
 - `APP_ENV`：运行环境，`development` 或 `production`（建议生产环境显式设置为 `production` 以启用更严格安全校验）
-- `DATABASE_URL`：PostgreSQL 连接串（生产环境必须使用 TLS，`sslmode=require|verify-ca|verify-full`）
+- `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD`：Docker PostgreSQL 连接参数
 - `JWT_SECRET`：JWT 密钥，至少 32 字符，禁止弱值
 - `CORS_ORIGIN`：明确前端 Origin（生产环境禁止 `*`）
 - `ADMIN_USERNAME`：管理员用户名（默认 `admin`）
@@ -57,6 +74,10 @@ cp .env.example .env
 - `VITE_IDENTITY_ROTATE_MINUTES`：端侧密钥轮换周期（分钟，默认 `240`）
 - `VITE_IDENTITY_KEY_HISTORY`：本地保留的历史私钥数量（默认 `6`）
 - `VITE_API_TIMEOUT_MS`：前端 API 请求超时时间（毫秒，默认 `12000`）
+
+如果你不是走 Docker Compose，而是直接在宿主机运行后端，请额外设置：
+
+- `DATABASE_URL`：PostgreSQL 连接串（生产环境必须启用 TLS：`sslmode=require|verify-ca|verify-full`）
 
 2. 启动
 
