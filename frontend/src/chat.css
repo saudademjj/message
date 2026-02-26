@@ -732,8 +732,8 @@ mark.search-highlight {
 .composer-row {
     display: flex;
     flex-direction: row;
-    gap: 10px;
-    align-items: flex-end;
+    gap: 8px;
+    align-items: stretch;
     width: 100%;
 }
 
@@ -744,6 +744,17 @@ mark.search-highlight {
     display: flex;
     flex-direction: column;
     justify-content: center;
+    background: var(--bg-surface-strong);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 0 12px;
+    min-height: 40px;
+    box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.composer-input-wrapper:focus-within {
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 2px var(--accent-primary-ghost), inset 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .mention-popover {
@@ -785,15 +796,18 @@ mark.search-highlight {
 .emoji-picker-wrapper {
     position: relative;
     display: inline-flex;
-    align-items: center;
+    align-items: stretch;
     isolation: isolate;
+    flex: 0 0 auto;
 }
 
 .emoji-trigger-btn {
-    padding: 4px 6px;
+    padding: 0 10px;
+    min-height: 40px;
+    min-width: 40px;
     font-size: 1.2rem;
-    border-radius: 8px;
-    margin-right: 2px;
+    border-radius: 12px;
+    margin-right: 0;
     color: var(--text-tertiary);
     transition: background 0.12s, color 0.12s;
 }
@@ -855,16 +869,22 @@ mark.search-highlight {
     min-height: 24px;
 }
 
-.composer-input textarea {
+.composer-input-wrapper textarea {
     border: none;
     background: transparent;
     box-shadow: none;
-    padding: 8px 0;
-    min-height: 24px;
-    font-size: 0.92rem;
-    line-height: 1.5;
+    padding: 9px 0;
+    min-height: 26px;
+    max-height: 140px;
+    font-size: 0.93rem;
+    line-height: 1.55;
+    letter-spacing: 0.01em;
     resize: none;
     color: var(--text-primary);
+}
+
+.composer-input-wrapper textarea::placeholder {
+    color: var(--text-tertiary);
 }
 
 .crypto-init-hint {
@@ -912,8 +932,9 @@ mark.search-highlight {
     display: flex;
     flex-direction: row;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     justify-content: flex-end;
+    flex: 0 0 auto;
 }
 
 .queue-hint {
