@@ -207,6 +207,11 @@
         padding: 10px 12px;
     }
 
+    .message-system-event span {
+        font-size: 0.68rem;
+        padding: 3px 10px;
+    }
+
     .bubble-content-wrapper {
         max-width: 85%;
     }
