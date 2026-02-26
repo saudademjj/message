@@ -122,6 +122,41 @@ export const ChatTimeline = memo(function ChatTimeline({
     };
   }, [focusMessageID, onFocusMessageHandled]);
 
+  useEffect(() => {
+    if (activeMessageId === null) {
+      return;
+    }
+
+    const handleGlobalPointerDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      const activeBubble = document.querySelector('.bubble-main.active');
+      if (activeBubble?.contains(target)) {
+        return;
+      }
+      setActiveMessageId(null);
+    };
+
+    const handleEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      setActiveMessageId(null);
+    };
+
+    document.addEventListener('mousedown', handleGlobalPointerDown);
+    document.addEventListener('touchstart', handleGlobalPointerDown, { passive: true });
+    window.addEventListener('keydown', handleEscape);
+
+    return () => {
+      document.removeEventListener('mousedown', handleGlobalPointerDown);
+      document.removeEventListener('touchstart', handleGlobalPointerDown);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [activeMessageId]);
+
   const isInitialHistoryLoading = historyLoading && messagesCount === 0;
 
   const messageListClassName = [
