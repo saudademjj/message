@@ -539,7 +539,7 @@ mark.search-highlight {
 .markdown-body {
     line-height: 1.42;
     font-size: 0.86rem;
-    white-space: pre-wrap;
+    white-space: normal;
     word-break: break-word;
     overflow: visible;
 }
