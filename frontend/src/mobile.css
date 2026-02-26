@@ -204,7 +204,7 @@
     }
 
     .message-list {
-        padding: 10px 12px;
+        padding: 12px;
     }
 
     .message-system-event span {
@@ -217,12 +217,12 @@
     }
 
     .bubble-main {
-        border-radius: 12px;
-        padding: 6px 9px;
+        border-radius: 10px 10px 10px 3px;
+        padding: 5px 8px;
     }
 
     .bubble.own .bubble-main {
-        border-radius: 12px;
+        border-radius: 10px 10px 3px 10px;
     }
 
     .bubble.emoji-only .markdown-body,
@@ -245,15 +245,22 @@
     }
 
     .bubble-action-btn {
-        min-height: 28px;
-        padding: 4px 10px;
-        font-size: 0.7rem;
+        min-height: 30px;
+        padding: 0 10px;
+        font-size: 0.72rem;
+    }
+
+    .bubble-actions-floating {
+        margin-bottom: 6px;
+        max-width: min(320px, calc(100vw - 24px));
     }
 
     .composer {
-        padding: 4px 4px 4px 10px;
-        border-radius: 14px;
-        gap: 3px;
+        padding: 0;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+        gap: 6px;
     }
 
     .composer-row {
@@ -262,23 +269,23 @@
     }
 
     .emoji-trigger-btn {
-        min-height: 36px;
-        min-width: 36px;
-        padding: 0 8px;
-        border-radius: 10px;
+        min-height: 38px;
+        min-width: 38px;
+        padding: 0;
+        border-radius: 999px;
         font-size: 1.08rem;
     }
 
     .composer-input-wrapper {
-        border-radius: 10px;
-        min-height: 36px;
-        padding: 0 10px;
+        border-radius: 20px;
+        min-height: 40px;
+        padding: 0 12px;
     }
 
     .composer-input-wrapper textarea {
         font-size: 16px;
-        line-height: 1.45;
-        padding: 7px 0;
+        line-height: 1.4;
+        padding: 9px 0;
         min-height: 24px;
     }
 
@@ -302,18 +309,19 @@
     }
 
     .send-btn {
-        width: 36px;
-        height: 36px;
-        min-height: 36px;
+        width: 38px;
+        height: 38px;
+        min-height: 38px;
+        min-width: 38px;
         padding: 0;
-        border-radius: 10px;
+        border-radius: 999px;
         flex-shrink: 0;
     }
 
     .send-icon {
-        width: 12px;
-        height: 12px;
-        margin-right: 0;
+        border-top-width: 5px;
+        border-bottom-width: 5px;
+        border-left-width: 9px;
     }
 
     .toast-stack {
@@ -407,7 +415,7 @@
 
     .emoji-picker-popover {
         position: fixed;
-        z-index: 4000;
+        z-index: 12000;
         border-radius: 12px;
         box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.15);
         animation: popover-enter 0.2s ease-out forwards;
