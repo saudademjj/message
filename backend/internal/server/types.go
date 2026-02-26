@@ -16,6 +16,7 @@ const (
 	defaultAppEnv          = "development"
 	defaultAdminUsername   = "admin"
 	defaultAdminRoomName   = "admin-secure"
+	defaultDeviceName      = "Browser Device"
 	defaultTrustProxy      = false
 	defaultLoginIPPerMin   = 30
 	defaultLoginIPBurst    = 10
@@ -29,6 +30,7 @@ const (
 	authCookieName         = "e2ee-chat.auth"
 	refreshCookieName      = "e2ee-chat.refresh"
 	csrfCookieName         = "e2ee-chat.csrf"
+	deviceCookieName       = "e2ee-chat.device"
 )
 
 type App struct {
@@ -47,16 +49,22 @@ type App struct {
 }
 
 type Claims struct {
-	UserID   int64  `json:"uid"`
-	Username string `json:"uname"`
-	Role     string `json:"role"`
+	UserID               int64  `json:"uid"`
+	Username             string `json:"uname"`
+	Role                 string `json:"role"`
+	DeviceID             string `json:"did"`
+	DeviceSessionVersion int    `json:"dsv"`
 	jwt.RegisteredClaims
 }
 
 type AuthContext struct {
-	UserID   int64
-	Username string
-	Role     string
+	UserID               int64
+	Username             string
+	Role                 string
+	DeviceID             string
+	DeviceName           string
+	DeviceSessionVersion int
+	DeviceLastSeenAt     time.Time
 }
 
 type Hub struct {
@@ -70,6 +78,8 @@ type Client struct {
 	send     chan []byte
 	userID   int64
 	username string
+	deviceID string
+	deviceName string
 	roomID   int64
 
 	mu               sync.RWMutex
@@ -80,6 +90,8 @@ type Client struct {
 type PeerSnapshot struct {
 	UserID              int64           `json:"userId"`
 	Username            string          `json:"username"`
+	DeviceID            string          `json:"deviceId"`
+	DeviceName          string          `json:"deviceName,omitempty"`
 	PublicKeyJWK        json.RawMessage `json:"publicKeyJwk"`
 	SigningPublicKeyJWK json.RawMessage `json:"signingPublicKeyJwk,omitempty"`
 }
@@ -88,9 +100,9 @@ type WrappedKey struct {
 	IV                  string          `json:"iv"`
 	WrappedKey          string          `json:"wrappedKey"`
 	RatchetDHPublicJWK  json.RawMessage `json:"ratchetDhPublicKeyJwk,omitempty"`
-	MessageNumber       int             `json:"messageNumber,omitempty"`
-	PreviousChainLength int             `json:"previousChainLength,omitempty"`
-	SessionVersion      int             `json:"sessionVersion,omitempty"`
+	MessageNumber       int             `json:"messageNumber"`
+	PreviousChainLength int             `json:"previousChainLength"`
+	SessionVersion      int             `json:"sessionVersion"`
 	PreKeyMessage       *PreKeyMessage  `json:"preKeyMessage,omitempty"`
 }
 
@@ -133,6 +145,7 @@ type WSIncoming struct {
 	SenderDeviceID        string                `json:"senderDeviceId,omitempty"`
 	EncryptionScheme      string                `json:"encryptionScheme,omitempty"`
 	ToUserID              int64                 `json:"toUserId,omitempty"`
+	ToDeviceID            string                `json:"toDeviceId,omitempty"`
 	Step                  string                `json:"step,omitempty"`
 	Action                string                `json:"action,omitempty"`
 	Mode                  string                `json:"mode,omitempty"`
@@ -164,14 +177,30 @@ type SignalPreKeyBundleUpload struct {
 	OneTimePreKeys        []SignalOneTimePreKey `json:"oneTimePreKeys"`
 }
 
-type SignalPreKeyBundleResponse struct {
-	UserID                int64                `json:"userId"`
-	Username              string               `json:"username"`
+type SignalDevicePreKeyBundle struct {
+	DeviceID              string               `json:"deviceId"`
 	IdentityKeyJWK        json.RawMessage      `json:"identityKeyJwk"`
 	IdentitySigningPubJWK json.RawMessage      `json:"identitySigningPublicKeyJwk"`
 	SignedPreKey          SignalSignedPreKey   `json:"signedPreKey"`
 	OneTimePreKey         *SignalOneTimePreKey `json:"oneTimePreKey,omitempty"`
 	UpdatedAt             string               `json:"updatedAt"`
+}
+
+type SignalPreKeyBundleResponse struct {
+	UserID    int64                    `json:"userId"`
+	Username  string                   `json:"username"`
+	Devices   []SignalDevicePreKeyBundle `json:"devices"`
+	UpdatedAt string                   `json:"updatedAt"`
+}
+
+type DeviceSnapshot struct {
+	DeviceID      string `json:"deviceId"`
+	DeviceName    string `json:"deviceName"`
+	SessionVersion int   `json:"sessionVersion"`
+	CreatedAt     string `json:"createdAt"`
+	LastSeenAt    string `json:"lastSeenAt"`
+	RevokedAt     *string `json:"revokedAt,omitempty"`
+	Current       bool   `json:"current"`
 }
 
 type StoredMessage struct {

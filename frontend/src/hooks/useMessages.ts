@@ -18,6 +18,7 @@ import {
   type Identity,
   type RatchetHandshakeOutgoing,
 } from '../crypto';
+import { buildRecipientAddress } from '../crypto/utils';
 import type { ApiClient } from '../api';
 import type { AuthSession } from '../contexts/AuthContext';
 import type { UIMessage } from '../app/appTypes';
@@ -31,7 +32,12 @@ import {
 import { useTimelineItems } from './useTimelineItems';
 import { useChatStore } from '../stores/chatStore';
 import { loadCachedPlaintexts, persistDecryptedPlaintext } from '../secureMessageStore';
-import { readOutgoingPlaintext } from '../outgoingPlaintextCache';
+import { markOutgoingPlaintextDelivered, readOutgoingPlaintext } from '../outgoingPlaintextCache';
+import {
+  clearResyncRequest,
+  rememberResyncRequest,
+  shouldCooldownResyncRequest,
+} from '../resyncRecoveryStore';
 import type {
   ChatMessage,
   DecryptAckFrame,
@@ -70,19 +76,25 @@ type UseMessagesArgs = {
   resolveSignalBundle: (targetUserID: number) => Promise<{
     userId: number;
     username?: string;
-    identityKeyJwk: JsonWebKey;
-    identitySigningPublicKeyJwk: JsonWebKey;
-    signedPreKey: {
-      keyId: number;
-      publicKeyJwk: JsonWebKey;
-      signature: string;
-      createdAt?: string;
-    };
-    oneTimePreKey?: {
-      keyId: number;
-      publicKeyJwk: JsonWebKey;
-      createdAt?: string;
-    };
+    devices: Array<{
+      deviceId: string;
+      userId: number;
+      username?: string;
+      identityKeyJwk: JsonWebKey;
+      identitySigningPublicKeyJwk: JsonWebKey;
+      signedPreKey: {
+        keyId: number;
+        publicKeyJwk: JsonWebKey;
+        signature: string;
+        createdAt?: string;
+      };
+      oneTimePreKey?: {
+        keyId: number;
+        publicKeyJwk: JsonWebKey;
+        createdAt?: string;
+      };
+      updatedAt?: string;
+    }>;
     updatedAt?: string;
   }>;
   reportError: (reason: unknown, fallback: string) => void;
@@ -98,7 +110,7 @@ type UseMessagesResult = {
   hasMoreHistory: boolean;
   historyLoading: boolean;
   isRoomSwitching: boolean;
-  peers: Record<number, Peer>;
+  peers: Record<string, Peer>;
   onlinePeers: Peer[];
   peerCount: number;
   peerSafetyNumbers: Record<number, string>;
@@ -298,9 +310,9 @@ export function useMessages({
       setPeerSafetyNumbers({});
       return;
     }
-    const peerIDs = Object.values(peers)
+    const peerIDs = [...new Set(Object.values(peers)
       .map((peer) => peer.userId)
-      .filter((peerID) => peerID > 0 && peerID !== auth.user.id);
+      .filter((peerID) => peerID > 0 && peerID !== auth.user.id))];
     if (peerIDs.length === 0) {
       setPeerSafetyNumbers({});
       return;
@@ -382,7 +394,7 @@ export function useMessages({
     }
   }, [auth, selectedRoomID, roomMembers, registerReadReceiptUpTo]);
 
-  const requestDecryptRecoveryIfNeeded = useCallback((message: Pick<ChatMessage, 'id' | 'senderId'>) => {
+  const requestDecryptRecoveryIfNeeded = useCallback((message: Pick<ChatMessage, 'id' | 'senderId' | 'payload'>) => {
     if (!auth || !selectedRoomID) {
       return;
     }
@@ -402,14 +414,21 @@ export function useMessages({
       fromUserId: auth.user.id,
       messageId: messageID,
     });
-    if (pendingResyncRecoveryRef.current.has(requestKey)) {
+    if (
+      pendingResyncRecoveryRef.current.has(requestKey)
+      || shouldCooldownResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID)
+    ) {
       return;
     }
 
+    const targetDeviceID = typeof message.payload?.senderDeviceId === 'string'
+      ? message.payload.senderDeviceId.trim()
+      : '';
     const request: DecryptRecoveryRequestFrame = {
       type: 'decrypt_recovery_request',
       roomId: selectedRoomID,
       toUserId: senderUserID,
+      toDeviceId: targetDeviceID || undefined,
       fromUserId: auth.user.id,
       fromUsername: auth.user.username,
       messageId: messageID,
@@ -419,15 +438,18 @@ export function useMessages({
     const sent = sendJSON({
       type: 'decrypt_recovery_request',
       messageId: messageID,
+      toDeviceId: targetDeviceID || undefined,
       action: 'resync',
     });
     if (!sent) {
       pendingResyncRecoveryRef.current.delete(requestKey);
+      return;
     }
+    rememberResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID);
   }, [auth, selectedRoomID, sendJSON]);
 
-  const clearPendingRecoveryRequest = useCallback((messageID: number) => {
-    if (!auth || !selectedRoomID || messageID <= 0) {
+  const clearPendingRecoveryRequest = useCallback((messageID: number, senderUserID: number) => {
+    if (!auth || !selectedRoomID || messageID <= 0 || senderUserID <= 0) {
       return;
     }
     const requestKey = buildRecoveryRequestKey({
@@ -436,6 +458,7 @@ export function useMessages({
       messageId: messageID,
     });
     pendingResyncRecoveryRef.current.delete(requestKey);
+    clearResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID);
   }, [auth, selectedRoomID]);
 
   const emitTypingStatus = useCallback((isTyping: boolean) => {
@@ -616,10 +639,20 @@ export function useMessages({
         };
       }
       try {
+        const senderDeviceID = typeof message.payload?.senderDeviceId === 'string' && message.payload.senderDeviceId.trim()
+          ? message.payload.senderDeviceId.trim()
+          : message.senderId === auth.user.id
+            ? auth.device.deviceId
+            : '';
+        if (!senderDeviceID) {
+          throw new Error('missing sender device id');
+        }
         const plaintext = await decryptPayload(
           message.payload,
           auth.user.id,
+          auth.device.deviceId,
           message.senderId,
+          senderDeviceID,
           identity,
         );
         try {
@@ -639,12 +672,23 @@ export function useMessages({
           typeof message.payload?.signature === 'string' &&
           message.payload.signature.trim()
         ) {
-          const fallbackPlaintext = readOutgoingPlaintext(
+          const fallbackPlaintext = await readOutgoingPlaintext(
             auth.user.id,
             message.roomId,
             message.payload.signature,
           );
           if (fallbackPlaintext) {
+            try {
+              await persistDecryptedPlaintext(auth.user.id, message, fallbackPlaintext);
+              await markOutgoingPlaintextDelivered(
+                auth.user.id,
+                message.roomId,
+                message.payload.signature,
+                message.id,
+              );
+            } catch {
+              // Ignore local plaintext persistence failures.
+            }
             return {
               ...message,
               plaintext: fallbackPlaintext,
@@ -721,7 +765,7 @@ export function useMessages({
       }
       if (resolved.decryptState === 'ok') {
         if (auth && resolved.senderId !== auth.user.id) {
-          clearPendingRecoveryRequest(resolved.id);
+          clearPendingRecoveryRequest(resolved.id, resolved.senderId);
         }
         queueDecryptAck(resolved);
         if (auth && resolved.senderId !== auth.user.id && stickToBottomRef.current) {
@@ -796,32 +840,72 @@ export function useMessages({
           // Ignore IDB read failures.
         }
       }
+      if (
+        !recoveryPlaintext
+        && original
+        && typeof original.payload?.signature === 'string'
+        && original.payload.signature.trim()
+      ) {
+        recoveryPlaintext = await readOutgoingPlaintext(
+          auth.user.id,
+          original.roomId,
+          original.payload.signature,
+        ) ?? undefined;
+      }
       if (!recoveryPlaintext) {
         setInfo(`收到 ${request.fromUsername} 的重同步请求，但本地明文不可用`);
         return false;
       }
 
-      await resetRatchetSession(auth.user.id, request.fromUserId);
-      const recoveryRecipients = [auth.user.id, request.fromUserId];
+      const requestFromDeviceID = typeof request.fromDeviceId === 'string' ? request.fromDeviceId.trim() : '';
+      if (requestFromDeviceID) {
+        await resetRatchetSession(
+          auth.user.id,
+          auth.device.deviceId,
+          request.fromUserId,
+          requestFromDeviceID,
+        );
+      }
+      const recoveryRecipientUsers = [auth.user.id, request.fromUserId];
       const sessionStatus = await ensureRatchetSessionsForRecipients(
         auth.user.id,
+        auth.device.deviceId,
         identity,
-        recoveryRecipients,
+        recoveryRecipientUsers,
         resolveSignalBundle,
       );
-      const pendingPeerIDs = sessionStatus.pendingPeerIDs
+      const pendingPeerIDs = sessionStatus.pendingUserIDs
         .filter((peerID) => peerID !== auth.user.id);
       if (pendingPeerIDs.length > 0) {
         throw new Error(`无法回传重同步消息，密钥会话未就绪: ${pendingPeerIDs.join(',')}`);
       }
 
+      const recoveryRecipients = sessionStatus.readyRecipients.filter((recipient) => {
+        if (recipient.userID === auth.user.id) {
+          return recipient.deviceID === auth.device.deviceId;
+        }
+        if (recipient.userID !== request.fromUserId) {
+          return false;
+        }
+        if (!requestFromDeviceID) {
+          return true;
+        }
+        return recipient.deviceID === requestFromDeviceID;
+      });
+      if (recoveryRecipients.length === 0) {
+        throw new Error('无法回传重同步消息，目标设备会话未就绪');
+      }
+
       const payload = await encryptForRecipients(
         recoveryPlaintext,
         auth.user.id,
+        auth.device.deviceId,
         identity,
         recoveryRecipients,
       );
-      const missingRecipients = recoveryRecipients.filter((peerID) => !(String(peerID) in payload.wrappedKeys));
+      const missingRecipients = recoveryRecipients
+        .map((recipient) => buildRecipientAddress(recipient.userID, recipient.deviceID))
+        .filter((address) => !(address in payload.wrappedKeys));
       if (missingRecipients.length > 0) {
         throw new Error(`回传重同步消息失败：密钥封装不完整 (${missingRecipients.join(',')})`);
       }
@@ -830,7 +914,8 @@ export function useMessages({
         type: 'decrypt_recovery_payload',
         messageId: request.messageId,
         toUserId: request.fromUserId,
-        payload,
+        toDeviceId: requestFromDeviceID || undefined,
+        ...payload,
       });
       if (!sent) {
         throw new Error('WebSocket 未连接');
@@ -995,12 +1080,16 @@ export function useMessages({
 
     const unsubscribe = subscribeMessage((frame) => {
       if (frame.type === 'room_peers') {
-        const nextPeers: Record<number, Peer> = {};
+        const nextPeers: Record<string, Peer> = {};
         const values = Array.isArray(frame.peers) ? frame.peers : [];
         for (const candidate of values) {
           const peer = candidate as Peer;
-          if (peer?.userId && peer?.publicKeyJwk && peer?.signingPublicKeyJwk) {
-            nextPeers[peer.userId] = peer;
+          const peerDeviceID = typeof peer?.deviceId === 'string' ? peer.deviceId.trim() : '';
+          if (peer?.userId && peerDeviceID && peer?.publicKeyJwk && peer?.signingPublicKeyJwk) {
+            nextPeers[buildRecipientAddress(peer.userId, peerDeviceID)] = {
+              ...peer,
+              deviceId: peerDeviceID,
+            };
           }
         }
         setPeers(nextPeers);
@@ -1008,20 +1097,24 @@ export function useMessages({
       }
 
       if (frame.type === 'peer_key') {
+        const peerDeviceID = typeof frame.deviceId === 'string' ? frame.deviceId.trim() : '';
         const peer = {
           userId: Number(frame.userId),
           username: String(frame.username ?? ''),
+          deviceId: peerDeviceID,
+          deviceName: typeof frame.deviceName === 'string' ? frame.deviceName : undefined,
           publicKeyJwk: frame.publicKeyJwk as JsonWebKey,
           signingPublicKeyJwk: frame.signingPublicKeyJwk as JsonWebKey,
         };
-        if (!peer.userId || !peer.publicKeyJwk || !peer.signingPublicKeyJwk) {
+        if (!peer.userId || !peer.deviceId || !peer.publicKeyJwk || !peer.signingPublicKeyJwk) {
           return;
         }
-        setPeers((previous) => ({ ...previous, [peer.userId]: peer }));
+        setPeers((previous) => ({ ...previous, [buildRecipientAddress(peer.userId, peer.deviceId)]: peer }));
         // Proactively establish ratchet session with new peer
         if (peer.userId !== auth.user.id) {
           void ensureRatchetSessionsForRecipients(
             auth.user.id,
+            auth.device.deviceId,
             identity,
             [auth.user.id, peer.userId],
             resolveSignalBundle,
@@ -1036,12 +1129,21 @@ export function useMessages({
 
       if (frame.type === 'peer_left') {
         const peerID = Number(frame.userId);
+        const peerDeviceID = typeof frame.deviceId === 'string' ? frame.deviceId.trim() : '';
         if (!peerID) {
           return;
         }
         setPeers((previous) => {
           const next = { ...previous };
-          delete next[peerID];
+          if (peerDeviceID) {
+            delete next[buildRecipientAddress(peerID, peerDeviceID)];
+            return next;
+          }
+          for (const [key, value] of Object.entries(next)) {
+            if (value.userId === peerID) {
+              delete next[key];
+            }
+          }
           return next;
         });
         return;
@@ -1199,6 +1301,10 @@ export function useMessages({
         if (recovery.roomId !== selectedRoomID || recovery.toUserId !== auth.user.id) {
           return;
         }
+        const recoveryToDeviceID = typeof recovery.toDeviceId === 'string' ? recovery.toDeviceId.trim() : '';
+        if (recoveryToDeviceID && recoveryToDeviceID !== auth.device.deviceId) {
+          return;
+        }
         if (recovery.messageId <= 0 || recovery.fromUserId <= 0 || !recovery.payload) {
           return;
         }
@@ -1217,10 +1323,18 @@ export function useMessages({
           payload: recovery.payload,
         };
         upsertIncomingMessage(repairedMessage);
-        const wrappedForMe = recovery.payload?.wrappedKeys?.[String(auth.user.id)];
+        const wrappedForMe = recovery.payload?.wrappedKeys?.[
+          buildRecipientAddress(auth.user.id, auth.device.deviceId)
+        ];
         void (async () => {
-          if (wrappedForMe?.preKeyMessage) {
-            await resetRatchetSession(auth.user.id, recovery.fromUserId);
+          const recoveryFromDeviceID = typeof recovery.fromDeviceId === 'string' ? recovery.fromDeviceId.trim() : '';
+          if (wrappedForMe?.preKeyMessage && recoveryFromDeviceID) {
+            await resetRatchetSession(
+              auth.user.id,
+              auth.device.deviceId,
+              recovery.fromUserId,
+              recoveryFromDeviceID,
+            );
           }
           void enqueueDecryptTask(async () => {
             await decryptAndUpdate(repairedMessage);
@@ -1235,16 +1349,24 @@ export function useMessages({
         if (request.roomId !== selectedRoomID || request.toUserId !== auth.user.id) {
           return;
         }
+        const requestToDeviceID = typeof request.toDeviceId === 'string' ? request.toDeviceId.trim() : '';
+        if (requestToDeviceID && requestToDeviceID !== auth.device.deviceId) {
+          return;
+        }
         if (request.fromUserId <= 0 || request.messageId <= 0) {
           return;
         }
 
         const requestKey = buildRecoveryRequestKey(request);
+        if (pendingResyncRecoveryRef.current.has(requestKey)) {
+          return;
+        }
         const action = request.action ?? 'resync';
         if (action === 'resync') {
           pendingResyncRecoveryRef.current.set(requestKey, request);
           void ensureRatchetSessionsForRecipients(
             auth.user.id,
+            auth.device.deviceId,
             identity,
             [auth.user.id, request.fromUserId],
             resolveSignalBundle,
@@ -1352,7 +1474,9 @@ export function useMessages({
       return;
     }
     for (const message of failedMessages) {
-      const hasWrappedKey = message.payload?.wrappedKeys?.[String(auth.user.id)];
+      const hasWrappedKey = message.payload?.wrappedKeys?.[
+        buildRecipientAddress(auth.user.id, auth.device.deviceId)
+      ];
       if (hasWrappedKey) {
         void enqueueDecryptTask(async () => {
           await decryptAndUpdate(message);
@@ -1644,12 +1768,12 @@ export function useMessages({
     try {
       const sessionStatus = await ensureRatchetSessionsForRecipients(
         auth.user.id,
+        auth.device.deviceId,
         identity,
         recipientIDs,
         resolveSignalBundle,
       );
-      const pendingPeerIDs = sessionStatus.pendingPeerIDs
-        .filter((peerID) => peerID !== auth.user.id);
+      const pendingPeerIDs = sessionStatus.pendingUserIDs;
       if (pendingPeerIDs.length > 0) {
         const deduped = [...new Set(pendingPeerIDs)].sort((left, right) => left - right);
         throw new Error(`编辑已中止：以下成员密钥会话未就绪 (${deduped.join(',')})`);
@@ -1657,10 +1781,13 @@ export function useMessages({
       const payload = await encryptForRecipients(
         nextText,
         auth.user.id,
+        auth.device.deviceId,
         identity,
-        recipientIDs,
+        sessionStatus.readyRecipients,
       );
-      const missingRecipients = recipientIDs.filter((peerID) => !(String(peerID) in payload.wrappedKeys));
+      const missingRecipients = sessionStatus.readyRecipients
+        .map((recipient) => buildRecipientAddress(recipient.userID, recipient.deviceID))
+        .filter((address) => !(address in payload.wrappedKeys));
       if (missingRecipients.length > 0) {
         throw new Error(`编辑已中止：密钥封装不完整 (${missingRecipients.join(',')})`);
       }
@@ -1709,15 +1836,25 @@ export function useMessages({
     if (senderUserID === auth.user.id) {
       return;
     }
+    if (shouldCooldownResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID)) {
+      setInfo(`消息 #${messageID} 已在冷却期内请求过重同步`);
+      return;
+    }
+    const targetMessage = messagesRef.current.find((item) => item.id === messageID);
+    const targetDeviceID = typeof targetMessage?.payload?.senderDeviceId === 'string'
+      ? targetMessage.payload.senderDeviceId.trim()
+      : '';
     const sent = sendJSON({
       type: 'decrypt_recovery_request',
       messageId: messageID,
+      toDeviceId: targetDeviceID || undefined,
       action: 'resync',
     });
     if (!sent) {
       setError('当前处于离线状态，无法发送恢复请求');
       return;
     }
+    rememberResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID);
     setInfo(`已请求发送方重同步密钥（消息 #${messageID}）`);
   }, [auth, selectedRoomID, sendJSON, setError, setInfo]);
 

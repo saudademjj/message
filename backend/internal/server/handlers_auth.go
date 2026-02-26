@@ -86,12 +86,23 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenString, err := a.issueToken(userID, req.Username, role)
+	loginDevice, err := a.upsertLoginDevice(
+		ctx,
+		userID,
+		deviceIDFromRequest(r),
+		normalizeDeviceName(r.Header.Get("X-Device-Name"), buildDefaultDeviceName(r)),
+	)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to initialize device session"})
+		return
+	}
+
+	tokenString, err := a.issueToken(userID, req.Username, role, loginDevice.DeviceID, loginDevice.SessionVersion)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to issue token"})
 		return
 	}
-	refreshToken, err := a.issueRefreshToken(ctx, userID)
+	refreshToken, err := a.issueRefreshToken(ctx, userID, loginDevice.DeviceID, loginDevice.SessionVersion)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to initialize refresh session"})
 		return
@@ -110,12 +121,19 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		a.effectiveAccessTokenTTL(),
 		a.effectiveRefreshTokenTTL(),
 	)
+	setDeviceCookie(w, loginDevice.DeviceID, isSecureRequest(r))
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"user": map[string]any{
 			"id":       userID,
 			"username": req.Username,
 			"role":     role,
+		},
+		"device": map[string]any{
+			"deviceId":       loginDevice.DeviceID,
+			"deviceName":     loginDevice.DeviceName,
+			"sessionVersion": loginDevice.SessionVersion,
+			"lastSeenAt":     loginDevice.LastSeenAt.UTC().Format(time.RFC3339Nano),
 		},
 	})
 }
@@ -130,6 +148,12 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request, auth AuthCon
 			"id":       auth.UserID,
 			"username": auth.Username,
 			"role":     auth.Role,
+		},
+		"device": map[string]any{
+			"deviceId":       auth.DeviceID,
+			"deviceName":     auth.DeviceName,
+			"sessionVersion": auth.DeviceSessionVersion,
+			"lastSeenAt":     auth.DeviceLastSeenAt.UTC().Format(time.RFC3339Nano),
 		},
 	})
 }
@@ -163,7 +187,13 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, err := a.issueToken(auth.UserID, auth.Username, auth.Role)
+	accessToken, err := a.issueToken(
+		auth.UserID,
+		auth.Username,
+		auth.Role,
+		auth.DeviceID,
+		auth.DeviceSessionVersion,
+	)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to issue refreshed token"})
 		return
@@ -183,12 +213,19 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		a.effectiveAccessTokenTTL(),
 		a.effectiveRefreshTokenTTL(),
 	)
+	setDeviceCookie(w, auth.DeviceID, isSecureRequest(r))
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"user": map[string]any{
 			"id":       auth.UserID,
 			"username": auth.Username,
 			"role":     auth.Role,
+		},
+		"device": map[string]any{
+			"deviceId":       auth.DeviceID,
+			"deviceName":     auth.DeviceName,
+			"sessionVersion": auth.DeviceSessionVersion,
+			"lastSeenAt":     auth.DeviceLastSeenAt.UTC().Format(time.RFC3339Nano),
 		},
 	})
 }

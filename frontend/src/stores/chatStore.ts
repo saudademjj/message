@@ -10,7 +10,7 @@ type ChatStore = {
   selectedRoomID: number | null;
   messages: UIMessage[];
   messageReadReceipts: Record<number, number[]>;
-  peers: Record<number, Peer>;
+  peers: Record<string, Peer>;
   sendQueue: SendQueueItem[];
   managedUsers: User[];
   setRooms: (next: ValueOrUpdater<Room[]>) => void;
@@ -18,7 +18,7 @@ type ChatStore = {
   setSelectedRoomID: (next: ValueOrUpdater<number | null>) => void;
   setMessages: (next: ValueOrUpdater<UIMessage[]>) => void;
   setMessageReadReceipts: (next: ValueOrUpdater<Record<number, number[]>>) => void;
-  setPeers: (next: ValueOrUpdater<Record<number, Peer>>) => void;
+  setPeers: (next: ValueOrUpdater<Record<string, Peer>>) => void;
   setSendQueue: (next: ValueOrUpdater<SendQueueItem[]>) => void;
   setManagedUsers: (next: ValueOrUpdater<User[]>) => void;
   resetSessionScopedState: () => void;

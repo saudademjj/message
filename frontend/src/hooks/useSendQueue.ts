@@ -4,6 +4,7 @@ import {
   encryptForRecipients,
   type Identity,
 } from '../crypto';
+import { buildRecipientAddress } from '../crypto/utils';
 import type { SendQueueItem } from '../app/appTypes';
 import { formatError } from '../app/helpers';
 import { useChatStore } from '../stores/chatStore';
@@ -19,25 +20,31 @@ type UseSendQueueArgs = {
   wsConnected: boolean;
   setRoomMembers: (next: ValueOrUpdater<User[]>) => void;
   handshakeTick: number;
-  peers: Record<number, Peer>;
+  peers: Record<string, Peer>;
   sendJSON: (frame: unknown) => boolean;
   apiListRoomMembers: (roomID: number) => Promise<{ roomId: number; members: User[] }>;
   resolveSignalBundle: (targetUserID: number) => Promise<{
     userId: number;
     username?: string;
-    identityKeyJwk: JsonWebKey;
-    identitySigningPublicKeyJwk: JsonWebKey;
-    signedPreKey: {
-      keyId: number;
-      publicKeyJwk: JsonWebKey;
-      signature: string;
-      createdAt?: string;
-    };
-    oneTimePreKey?: {
-      keyId: number;
-      publicKeyJwk: JsonWebKey;
-      createdAt?: string;
-    };
+    devices: Array<{
+      deviceId: string;
+      userId: number;
+      username?: string;
+      identityKeyJwk: JsonWebKey;
+      identitySigningPublicKeyJwk: JsonWebKey;
+      signedPreKey: {
+        keyId: number;
+        publicKeyJwk: JsonWebKey;
+        signature: string;
+        createdAt?: string;
+      };
+      oneTimePreKey?: {
+        keyId: number;
+        publicKeyJwk: JsonWebKey;
+        createdAt?: string;
+      };
+      updatedAt?: string;
+    }>;
     updatedAt?: string;
   }>;
   reportError: (reason: unknown, fallback: string) => void;
@@ -155,23 +162,23 @@ export function useSendQueue({
         setRoomMembers(membersResult.members);
         const currentMembers = membersResult.members;
 
-        let recipientIDs = [...new Set(
+        let recipientUserIDs = [...new Set(
           currentMembers
             .map((member) => member.id)
             .filter((memberID) => Number.isFinite(memberID) && memberID > 0),
         )];
-        if (!recipientIDs.includes(authUserID)) {
-          recipientIDs = [authUserID, ...recipientIDs];
+        if (!recipientUserIDs.includes(authUserID)) {
+          recipientUserIDs = [authUserID, ...recipientUserIDs];
         }
 
         const sessionStatus = await ensureRatchetSessionsForRecipients(
           authUserID,
+          identity.activeKeyID,
           identity,
-          recipientIDs,
+          recipientUserIDs,
           resolveSignalBundle,
         );
-        const pendingPeerIDs = sessionStatus.pendingPeerIDs
-          .filter((peerID) => peerID !== authUserID);
+        const pendingPeerIDs = sessionStatus.pendingUserIDs;
         if (pendingPeerIDs.length > 0) {
           const deduped = [...new Set(pendingPeerIDs)].sort((left, right) => left - right);
           throw new Error(`以下成员密钥会话未就绪: ${deduped.join(',')}`);
@@ -180,10 +187,16 @@ export function useSendQueue({
         const payload = await encryptForRecipients(
           target.text,
           authUserID,
+          identity.activeKeyID,
           identity,
-          recipientIDs,
+          sessionStatus.readyRecipients,
         );
-        const missingRecipients = recipientIDs.filter((peerID) => !(String(peerID) in payload.wrappedKeys));
+        if (payload.signature) {
+          await rememberOutgoingPlaintext(authUserID, selectedRoomID, payload.signature, target.text);
+        }
+        const missingRecipients = sessionStatus.readyRecipients
+          .map((recipient) => buildRecipientAddress(recipient.userID, recipient.deviceID))
+          .filter((address) => !(address in payload.wrappedKeys));
         if (missingRecipients.length > 0) {
           throw new Error(`发送中止：密钥封装不完整 (${missingRecipients.join(',')})`);
         }
@@ -194,9 +207,6 @@ export function useSendQueue({
         });
         if (!sent) {
           throw new Error('WebSocket 未连接');
-        }
-        if (payload.signature) {
-          rememberOutgoingPlaintext(authUserID, selectedRoomID, payload.signature, target.text);
         }
 
         replaceQueue(sendQueueRef.current.filter((item) => item.id !== target.id));

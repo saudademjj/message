@@ -45,7 +45,7 @@ func (a *App) withCORS(next http.Handler) http.Handler {
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-CSRF-Token")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -108,7 +108,24 @@ func (a *App) withAuth(next func(http.ResponseWriter, *http.Request, AuthContext
 			respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "token role mismatch"})
 			return
 		}
-		next(w, r, AuthContext{UserID: claims.UserID, Username: claims.Username, Role: role})
+		device, err := a.validateDeviceClaim(ctx, claims.UserID, claims.DeviceID, claims.DeviceSessionVersion)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, errInvalidIdentity) {
+				respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "device session expired"})
+				return
+			}
+			respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to validate device session"})
+			return
+		}
+		next(w, r, AuthContext{
+			UserID:               claims.UserID,
+			Username:             claims.Username,
+			Role:                 role,
+			DeviceID:             device.DeviceID,
+			DeviceName:           device.DeviceName,
+			DeviceSessionVersion: device.SessionVersion,
+			DeviceLastSeenAt:     device.LastSeenAt,
+		})
 	}
 }
 

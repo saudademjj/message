@@ -3,10 +3,11 @@ import {
   decryptPayload,
   encryptForRecipients,
   ensureRatchetSessionsForRecipients,
-  loadOrCreateIdentity,
+  loadOrCreateIdentityForDevice,
   rotateIdentityIfNeeded,
   toSignalPreKeyBundleUpload,
   type SignalPreKeyBundle,
+  type SignalPreKeyBundleList,
 } from './index';
 
 async function clearSecureDB(): Promise<void> {
@@ -18,9 +19,14 @@ async function clearSecureDB(): Promise<void> {
   });
 }
 
-function toBundle(userID: number, username: string, identity: Awaited<ReturnType<typeof loadOrCreateIdentity>>): SignalPreKeyBundle {
+function toBundle(
+  userID: number,
+  username: string,
+  identity: Awaited<ReturnType<typeof loadOrCreateIdentityForDevice>>,
+): SignalPreKeyBundle {
   const upload = toSignalPreKeyBundleUpload(identity);
   return {
+    deviceId: identity.activeKeyID,
     userId: userID,
     username,
     identityKeyJwk: upload.identityKeyJwk,
@@ -33,70 +39,108 @@ function toBundle(userID: number, username: string, identity: Awaited<ReturnType
   };
 }
 
+function toBundleList(
+  userID: number,
+  username: string,
+  identities: Array<Awaited<ReturnType<typeof loadOrCreateIdentityForDevice>>>,
+): SignalPreKeyBundleList {
+  return {
+    userId: userID,
+    username,
+    devices: identities.map((identity) => toBundle(userID, username, identity)),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 describe('signal core ratchet flows', () => {
   beforeEach(async () => {
     await clearSecureDB();
   });
 
   it('rotates signed prekey material when max age is exceeded', async () => {
-    const first = await loadOrCreateIdentity(101);
+    const first = await loadOrCreateIdentityForDevice(101, 'device-101-main');
     await new Promise((resolve) => setTimeout(resolve, 5));
 
-    const result = await rotateIdentityIfNeeded(101, 1, 6);
+    const result = await rotateIdentityIfNeeded(101, 'device-101-main', 1, 6);
 
     expect(result.rotated).toBe(true);
     expect(result.identity.signedPreKey.keyID).not.toBe(first.signedPreKey.keyID);
   });
 
-  it('establishes X3DH session from prekey bundle and decrypts initial message offline', async () => {
-    const alice = await loadOrCreateIdentity(201);
-    const bob = await loadOrCreateIdentity(202);
+  it('establishes device-level sessions and decrypts across same-account devices', async () => {
+    const aliceMobile = await loadOrCreateIdentityForDevice(201, 'alice-mobile');
+    const aliceDesktop = await loadOrCreateIdentityForDevice(201, 'alice-desktop');
+    const bobPhone = await loadOrCreateIdentityForDevice(202, 'bob-phone');
 
-    await ensureRatchetSessionsForRecipients(
+    const sessionStatus = await ensureRatchetSessionsForRecipients(
       201,
-      alice,
+      'alice-mobile',
+      aliceMobile,
       [201, 202],
       async (userID) => {
-        if (userID !== 202) {
-          throw new Error(`unexpected recipient ${userID}`);
+        if (userID === 201) {
+          return toBundleList(201, 'alice', [aliceMobile, aliceDesktop]);
         }
-        return toBundle(202, 'bob', bob);
+        if (userID === 202) {
+          return toBundleList(202, 'bob', [bobPhone]);
+        }
+        throw new Error(`unexpected recipient ${userID}`);
       },
     );
+    expect(sessionStatus.pendingUserIDs).toHaveLength(0);
 
-    const payload = await encryptForRecipients('hello bob', 201, alice, [201, 202]);
+    const payload = await encryptForRecipients(
+      'hello bob',
+      201,
+      'alice-mobile',
+      aliceMobile,
+      sessionStatus.readyRecipients,
+    );
 
-    const bobText = await decryptPayload(payload, 202, 201, bob);
-    const aliceText = await decryptPayload(payload, 201, 201, alice);
+    const bobText = await decryptPayload(payload, 202, 'bob-phone', 201, 'alice-mobile', bobPhone);
+    const aliceMobileText = await decryptPayload(payload, 201, 'alice-mobile', 201, 'alice-mobile', aliceMobile);
+    const aliceDesktopText = await decryptPayload(payload, 201, 'alice-desktop', 201, 'alice-mobile', aliceDesktop);
 
     expect(bobText).toBe('hello bob');
-    expect(aliceText).toBe('hello bob');
-    expect(payload.wrappedKeys['202'].preKeyMessage).toBeTruthy();
+    expect(aliceMobileText).toBe('hello bob');
+    expect(aliceDesktopText).toBe('hello bob');
+    expect(payload.wrappedKeys['201:alice-desktop']?.preKeyMessage).toBeTruthy();
+    expect(payload.wrappedKeys['202:bob-phone']?.preKeyMessage).toBeTruthy();
   });
 
   it('rejects ciphertext tampering via signature verification', async () => {
-    const alice = await loadOrCreateIdentity(301);
-    const bob = await loadOrCreateIdentity(302);
+    const alice = await loadOrCreateIdentityForDevice(301, 'alice-main');
+    const bob = await loadOrCreateIdentityForDevice(302, 'bob-main');
 
-    await ensureRatchetSessionsForRecipients(
+    const sessionStatus = await ensureRatchetSessionsForRecipients(
       301,
+      'alice-main',
       alice,
       [301, 302],
       async (userID) => {
-        if (userID !== 302) {
-          throw new Error(`unexpected recipient ${userID}`);
+        if (userID === 301) {
+          return toBundleList(301, 'alice', [alice]);
         }
-        return toBundle(302, 'bob', bob);
+        if (userID === 302) {
+          return toBundleList(302, 'bob', [bob]);
+        }
+        throw new Error(`unexpected recipient ${userID}`);
       },
     );
 
-    const payload = await encryptForRecipients('integrity-check', 301, alice, [301, 302]);
+    const payload = await encryptForRecipients(
+      'integrity-check',
+      301,
+      'alice-main',
+      alice,
+      sessionStatus.readyRecipients,
+    );
     const tampered = {
       ...payload,
       ciphertext: `${payload.ciphertext}A`,
     };
 
-    await expect(decryptPayload(tampered, 302, 301, bob)).rejects.toThrow(
+    await expect(decryptPayload(tampered, 302, 'bob-main', 301, 'alice-main', bob)).rejects.toThrow(
       'message signature verification failed',
     );
   });

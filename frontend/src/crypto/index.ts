@@ -4,11 +4,14 @@ export type {
   RatchetHandshakeOutgoing,
   RatchetSessionStatus,
   SignalPreKeyBundle,
+  SignalPreKeyBundleList,
   SignalPreKeyBundleUpload,
+  RecipientAddress,
 } from './types';
 
 export {
   loadOrCreateIdentity,
+  loadOrCreateIdentityForDevice,
   rotateIdentityIfNeeded,
   toSignalPreKeyBundleUpload,
 } from './identity';

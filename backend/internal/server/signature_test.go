@@ -217,3 +217,59 @@ func TestVerifyCipherSignatureEd25519(t *testing.T) {
 		t.Fatalf("verify cipher signature (ed25519) failed: %v", err)
 	}
 }
+
+func TestVerifyCipherSignatureWithDeviceAddressedRecipients(t *testing.T) {
+	privateKey, signingJWK := makeECDSAP256JWK(t)
+	payload := CipherPayload{
+		Version:    3,
+		Ciphertext: "ciphertext-value",
+		MessageIV:  "iv-value",
+		WrappedKeys: map[string]WrappedKey{
+			"9:mobile": {
+				IV:                  "wrap-iv-mobile",
+				WrappedKey:          "wrap-key-mobile",
+				MessageNumber:       1,
+				PreviousChainLength: 0,
+				SessionVersion:      1,
+			},
+			"9:web": {
+				IV:                  "wrap-iv-web",
+				WrappedKey:          "wrap-key-web",
+				MessageNumber:       1,
+				PreviousChainLength: 0,
+				SessionVersion:      1,
+			},
+		},
+		SenderPublicJWK: mustJSONRaw(t, map[string]any{
+			"kty": "EC",
+			"crv": "P-256",
+			"x":   "sender-x",
+			"y":   "sender-y",
+		}),
+		SenderSigningPubJWK: signingJWK,
+		ContentType:         "text/plain",
+		SenderDeviceID:      "mobile",
+		EncryptionScheme:    "DOUBLE_RATCHET_V1",
+	}
+
+	canonical, err := canonicalSignaturePayload(payload)
+	if err != nil {
+		t.Fatalf("canonical signature payload: %v", err)
+	}
+	payload.Signature = signWithECDSA(t, privateKey, canonical)
+	if err := verifyCipherSignature(payload); err != nil {
+		t.Fatalf("verify cipher signature with device addressed recipients failed: %v", err)
+	}
+
+	tampered := payload
+	tampered.WrappedKeys = map[string]WrappedKey{}
+	for key, value := range payload.WrappedKeys {
+		tampered.WrappedKeys[key] = value
+	}
+	entry := tampered.WrappedKeys["9:web"]
+	entry.WrappedKey = "tampered-wrap-key"
+	tampered.WrappedKeys["9:web"] = entry
+	if err := verifyCipherSignature(tampered); err == nil {
+		t.Fatalf("expected verifyCipherSignature to fail when wrapped key is tampered")
+	}
+}

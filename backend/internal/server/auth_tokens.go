@@ -23,13 +23,15 @@ type InviteClaims struct {
 	jwt.RegisteredClaims
 }
 
-func (a *App) issueToken(userID int64, username, role string) (string, error) {
+func (a *App) issueToken(userID int64, username, role, deviceID string, deviceSessionVersion int) (string, error) {
 	now := time.Now().UTC()
 	ttl := a.effectiveAccessTokenTTL()
 	claims := Claims{
-		UserID:   userID,
-		Username: username,
-		Role:     role,
+		UserID:               userID,
+		Username:             username,
+		Role:                 role,
+		DeviceID:             deviceID,
+		DeviceSessionVersion: deviceSessionVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "e2ee-chat-backend",
 			Subject:   fmt.Sprintf("%d", userID),
@@ -64,6 +66,9 @@ func (a *App) parseToken(tokenString string) (*Claims, error) {
 		return nil, errors.New("invalid token claims")
 	}
 	if claims.Role != "admin" && claims.Role != "user" {
+		return nil, errors.New("invalid token claims")
+	}
+	if normalizeDeviceID(claims.DeviceID) == "" || claims.DeviceSessionVersion <= 0 {
 		return nil, errors.New("invalid token claims")
 	}
 	return claims, nil

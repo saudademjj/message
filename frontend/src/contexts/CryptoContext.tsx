@@ -8,7 +8,11 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { loadOrCreateIdentity, rotateIdentityIfNeeded, type Identity } from '../crypto';
+import {
+  loadOrCreateIdentityForDevice,
+  rotateIdentityIfNeeded,
+  type Identity,
+} from '../crypto';
 import { useAuth } from './AuthContext';
 
 type CryptoContextValue = {
@@ -56,7 +60,7 @@ export function CryptoProvider({ children }: CryptoProviderProps) {
 
     const initWithTimeout = (): Promise<Identity> => {
       return Promise.race([
-        loadOrCreateIdentity(auth.user.id),
+        loadOrCreateIdentityForDevice(auth.user.id, auth.device.deviceId),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('密钥初始化超时 (10s)，请刷新页面重试')), INIT_TIMEOUT_MS),
         ),
@@ -106,6 +110,7 @@ export function CryptoProvider({ children }: CryptoProviderProps) {
       try {
         const { identity: nextIdentity, rotated } = await rotateIdentityIfNeeded(
           auth.user.id,
+          auth.device.deviceId,
           rotationAgeMs,
           historyLimit,
         );

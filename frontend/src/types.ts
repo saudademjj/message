@@ -10,6 +10,16 @@ export interface Room {
   createdAt: string;
 }
 
+export interface DeviceSnapshot {
+  deviceId: string;
+  deviceName: string;
+  sessionVersion: number;
+  createdAt: string;
+  lastSeenAt: string;
+  revokedAt?: string | null;
+  current: boolean;
+}
+
 export interface WrappedKey {
   iv: string;
   wrappedKey: string;
@@ -54,6 +64,8 @@ export interface ChatMessage {
 export interface Peer {
   userId: number;
   username: string;
+  deviceId: string;
+  deviceName?: string;
   publicKeyJwk: JsonWebKey;
   signingPublicKeyJwk?: JsonWebKey;
 }
@@ -72,12 +84,20 @@ export interface SignalOneTimePreKey {
 }
 
 export interface SignalPreKeyBundle {
+  deviceId: string;
   userId: number;
   username?: string;
   identityKeyJwk: JsonWebKey;
   identitySigningPublicKeyJwk: JsonWebKey;
   signedPreKey: SignalSignedPreKey;
   oneTimePreKey?: SignalOneTimePreKey;
+  updatedAt?: string;
+}
+
+export interface SignalPreKeyBundleList {
+  userId: number;
+  username?: string;
+  devices: SignalPreKeyBundle[];
   updatedAt?: string;
 }
 
@@ -127,7 +147,9 @@ export interface DecryptRecoveryRequestFrame {
   messageId: number;
   fromUserId: number;
   fromUsername: string;
+  fromDeviceId?: string;
   toUserId: number;
+  toDeviceId?: string;
   action?: 'resync';
 }
 
@@ -137,7 +159,9 @@ export interface DecryptRecoveryPayloadFrame {
   messageId: number;
   fromUserId: number;
   fromUsername: string;
+  fromDeviceId?: string;
   toUserId: number;
+  toDeviceId?: string;
   payload: CipherPayload;
 }
 

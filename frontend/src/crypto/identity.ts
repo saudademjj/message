@@ -205,6 +205,7 @@ async function createIdentityRecord(userID: number): Promise<PersistedIdentityRe
 
 async function ensureIdentityRecord(
   userID: number,
+  preferredDeviceID: string | null,
   maxAgeMs: number,
   signedPreKeyHistoryLimit: number,
   oneTimePreKeyTarget: number,
@@ -212,10 +213,13 @@ async function ensureIdentityRecord(
   const existing = await readIdentityRecord(userID);
   if (!existing) {
     await deleteAllSessionsForUser(userID);
-    return {
-      record: await createIdentityRecord(userID),
-      changed: true,
-    };
+    const created = await createIdentityRecord(userID);
+    if (preferredDeviceID && preferredDeviceID !== created.deviceID) {
+      const patched = { ...created, deviceID: preferredDeviceID };
+      await writeIdentityRecord(patched);
+      return { record: patched, changed: true };
+    }
+    return { record: created, changed: true };
   }
 
   if (!hasPersistablePrivateKeys(existing)) {
@@ -228,6 +232,16 @@ async function ensureIdentityRecord(
 
   let changed = false;
   let nextRecord = existing;
+
+  if (preferredDeviceID && nextRecord.deviceID !== preferredDeviceID) {
+    nextRecord = {
+      ...nextRecord,
+      deviceID: preferredDeviceID,
+      updatedAt: new Date().toISOString(),
+    };
+    await deleteAllSessionsForUser(userID);
+    changed = true;
+  }
 
   const active = nextRecord.signedPreKeys.find((entry) => entry.keyID === nextRecord.activeSignedPreKeyID)
     ?? nextRecord.signedPreKeys[nextRecord.signedPreKeys.length - 1];
@@ -286,6 +300,20 @@ export async function loadOrCreateIdentity(userID: number): Promise<Identity> {
   requireCryptoSupport();
   const { record } = await ensureIdentityRecord(
     userID,
+    null,
+    DEFAULT_KEY_MAX_AGE_MS,
+    toSignedPreKeyHistoryLimit(DEFAULT_KEY_HISTORY_LIMIT),
+    ONE_TIME_PREKEY_TARGET,
+  );
+  return toIdentity(record);
+}
+
+export async function loadOrCreateIdentityForDevice(userID: number, deviceID: string): Promise<Identity> {
+  requireCryptoSupport();
+  const normalizedDeviceID = deviceID.trim();
+  const { record } = await ensureIdentityRecord(
+    userID,
+    normalizedDeviceID || null,
     DEFAULT_KEY_MAX_AGE_MS,
     toSignedPreKeyHistoryLimit(DEFAULT_KEY_HISTORY_LIMIT),
     ONE_TIME_PREKEY_TARGET,
@@ -295,6 +323,7 @@ export async function loadOrCreateIdentity(userID: number): Promise<Identity> {
 
 export async function rotateIdentityIfNeeded(
   userID: number,
+  deviceID: string | null = null,
   maxAgeMs = DEFAULT_KEY_MAX_AGE_MS,
   historyLimit = DEFAULT_KEY_HISTORY_LIMIT,
 ): Promise<RotationResult> {
@@ -306,6 +335,7 @@ export async function rotateIdentityIfNeeded(
 
   const { record, changed } = await ensureIdentityRecord(
     userID,
+    deviceID && deviceID.trim() ? deviceID.trim() : null,
     safeMaxAgeMs,
     signedPreKeyHistoryLimit,
     oneTimePreKeyTarget,

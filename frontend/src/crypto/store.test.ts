@@ -176,9 +176,11 @@ describe('crypto store jwk compatibility', () => {
     const db = await openSecureDB();
     try {
       await putRecord(db, SESSION_STORE, {
-        id: '7001:7002',
+        id: '7001:device-7001:7002:device-7002',
         userID: 7001,
+        localDeviceID: 'device-7001',
         peerUserID: 7002,
+        peerDeviceID: 'device-7002',
         rootKey: 'root-key-b64',
         sendChainKey: 'send-chain-key-b64',
         recvChainKey: 'recv-chain-key-b64',
@@ -199,10 +201,10 @@ describe('crypto store jwk compatibility', () => {
       db.close();
     }
 
-    const session = await readSession(7001, 7002);
+    const session = await readSession(7001, 'device-7001', 7002, 'device-7002');
 
     expect(session).not.toBeNull();
-    expect(session?.id).toBe('7001:7002');
+    expect(session?.id).toBe('7001:device-7001:7002:device-7002');
     expect(session?.dhSendPrivate).toBeInstanceOf(CryptoKey);
     expect(session?.peerIdentityPublicKeyJwk?.crv).toBe('P-256');
   });
@@ -294,11 +296,13 @@ describe('crypto store jwk compatibility', () => {
     ) as CryptoKeyPair;
 
     ensureTestLocalStorage().setItem(
-      `${SECURE_DB_NAME}:session:8001:8002`,
+      `${SECURE_DB_NAME}:session:8001:device-8001:8002:device-8002`,
       JSON.stringify({
-        id: '8001:8002',
+        id: '8001:device-8001:8002:device-8002',
         userID: 8001,
+        localDeviceID: 'device-8001',
         peerUserID: 8002,
+        peerDeviceID: 'device-8002',
         rootKey: 'root-key-b64',
         sendChainKey: 'send-chain-key-b64',
         recvChainKey: 'recv-chain-key-b64',
@@ -322,9 +326,9 @@ describe('crypto store jwk compatibility', () => {
     }) as unknown as typeof indexedDB.open);
 
     try {
-      const session = await readSession(8001, 8002);
+      const session = await readSession(8001, 'device-8001', 8002, 'device-8002');
       expect(session).not.toBeNull();
-      expect(session?.id).toBe('8001:8002');
+      expect(session?.id).toBe('8001:device-8001:8002:device-8002');
       expect(session?.sendCount).toBe(6);
     } finally {
       openSpy.mockRestore();

@@ -30,6 +30,8 @@ func (h *Hub) AddClient(client *Client) []PeerSnapshot {
 		peers = append(peers, PeerSnapshot{
 			UserID:              peer.userID,
 			Username:            peer.username,
+			DeviceID:            peer.deviceID,
+			DeviceName:          peer.deviceName,
 			PublicKeyJWK:        pub,
 			SigningPublicKeyJWK: signing,
 		})
@@ -37,6 +39,33 @@ func (h *Hub) AddClient(client *Client) []PeerSnapshot {
 
 	roomClients[client] = struct{}{}
 	return peers
+}
+
+func (h *Hub) KickUserDevice(userID int64, deviceID string, code int, reason string) {
+	h.mu.RLock()
+	targets := make([]*Client, 0, 4)
+	for _, roomClients := range h.rooms {
+		for client := range roomClients {
+			if client.userID == userID && client.deviceID == deviceID {
+				targets = append(targets, client)
+			}
+		}
+	}
+	h.mu.RUnlock()
+
+	if len(targets) == 0 {
+		return
+	}
+
+	deadline := time.Now().Add(1 * time.Second)
+	for _, client := range targets {
+		_ = client.conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(code, reason),
+			deadline,
+		)
+		_ = client.conn.Close()
+	}
 }
 
 func (h *Hub) RemoveClient(client *Client) {
@@ -107,6 +136,46 @@ func (h *Hub) Unicast(roomID int64, userID int64, payload []byte) {
 				"websocket_unicast_drop",
 				"user_id",
 				client.userID,
+				"room_id",
+				roomID,
+				"reason",
+				"send queue full",
+			)
+		}
+	}
+}
+
+func (h *Hub) UnicastToDevice(roomID int64, userID int64, deviceID string, payload []byte) {
+	trimmedDeviceID := normalizeDeviceID(deviceID)
+	if trimmedDeviceID == "" {
+		h.Unicast(roomID, userID, payload)
+		return
+	}
+
+	h.mu.RLock()
+	roomClients, ok := h.rooms[roomID]
+	if !ok {
+		h.mu.RUnlock()
+		return
+	}
+	targets := make([]*Client, 0, len(roomClients))
+	for client := range roomClients {
+		if client.userID == userID && client.deviceID == trimmedDeviceID {
+			targets = append(targets, client)
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, client := range targets {
+		select {
+		case client.send <- payload:
+		default:
+			logger.Warn(
+				"websocket_unicast_device_drop",
+				"user_id",
+				client.userID,
+				"device_id",
+				client.deviceID,
 				"room_id",
 				roomID,
 				"reason",

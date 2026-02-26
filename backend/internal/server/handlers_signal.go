@@ -214,44 +214,45 @@ func (a *App) handleSignalPreKeyBundleUpsert(w http.ResponseWriter, r *http.Requ
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO signal_identity_keys(user_id, identity_key_jwk, identity_signing_public_key_jwk, updated_at)
-VALUES ($1, $2::jsonb, $3::jsonb, NOW())
-ON CONFLICT (user_id) DO UPDATE
+INSERT INTO signal_device_identity_keys(user_id, device_id, identity_key_jwk, identity_signing_public_key_jwk, updated_at)
+VALUES ($1, $2, $3::jsonb, $4::jsonb, NOW())
+ON CONFLICT (user_id, device_id) DO UPDATE
 SET identity_key_jwk = EXCLUDED.identity_key_jwk,
     identity_signing_public_key_jwk = EXCLUDED.identity_signing_public_key_jwk,
     updated_at = NOW()
-`, auth.UserID, req.IdentityKeyJWK, req.IdentitySigningPubJWK); err != nil {
+`, auth.UserID, auth.DeviceID, req.IdentityKeyJWK, req.IdentitySigningPubJWK); err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to upsert identity key"})
 		return
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO signal_identity_key_history(user_id, fingerprint, identity_key_jwk, first_seen_at, last_seen_at)
-VALUES ($1, $2, $3::jsonb, NOW(), NOW())
-ON CONFLICT (user_id, fingerprint) DO UPDATE
+INSERT INTO signal_device_identity_key_history(user_id, device_id, fingerprint, identity_key_jwk, first_seen_at, last_seen_at)
+VALUES ($1, $2, $3, $4::jsonb, NOW(), NOW())
+ON CONFLICT (user_id, device_id, fingerprint) DO UPDATE
 SET identity_key_jwk = EXCLUDED.identity_key_jwk,
     last_seen_at = NOW()
-`, auth.UserID, fingerprint, req.IdentityKeyJWK); err != nil {
+`, auth.UserID, auth.DeviceID, fingerprint, req.IdentityKeyJWK); err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to update identity history"})
 		return
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO signal_signed_prekeys(user_id, key_id, public_key_jwk, signature, updated_at)
-VALUES ($1, $2, $3::jsonb, $4, NOW())
-ON CONFLICT (user_id) DO UPDATE
+INSERT INTO signal_device_signed_prekeys(user_id, device_id, key_id, public_key_jwk, signature, updated_at)
+VALUES ($1, $2, $3, $4::jsonb, $5, NOW())
+ON CONFLICT (user_id, device_id) DO UPDATE
 SET key_id = EXCLUDED.key_id,
     public_key_jwk = EXCLUDED.public_key_jwk,
     signature = EXCLUDED.signature,
     updated_at = NOW()
-`, auth.UserID, req.SignedPreKey.KeyID, req.SignedPreKey.PublicKeyJWK, req.SignedPreKey.Signature); err != nil {
+`, auth.UserID, auth.DeviceID, req.SignedPreKey.KeyID, req.SignedPreKey.PublicKeyJWK, req.SignedPreKey.Signature); err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to upsert signed prekey"})
 		return
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM signal_one_time_prekeys WHERE user_id = $1 AND consumed_at IS NULL`,
+		`DELETE FROM signal_device_one_time_prekeys WHERE user_id = $1 AND device_id = $2 AND consumed_at IS NULL`,
 		auth.UserID,
+		auth.DeviceID,
 	); err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to reset one-time prekeys"})
 		return
@@ -260,13 +261,13 @@ SET key_id = EXCLUDED.key_id,
 	insertedOneTimePreKeys := 0
 	for _, entry := range req.OneTimePreKeys {
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO signal_one_time_prekeys(user_id, key_id, public_key_jwk, created_at, consumed_at)
-VALUES ($1, $2, $3::jsonb, NOW(), NULL)
-ON CONFLICT (user_id, key_id) DO UPDATE
+INSERT INTO signal_device_one_time_prekeys(user_id, device_id, key_id, public_key_jwk, created_at, consumed_at)
+VALUES ($1, $2, $3, $4::jsonb, NOW(), NULL)
+ON CONFLICT (user_id, device_id, key_id) DO UPDATE
 SET public_key_jwk = EXCLUDED.public_key_jwk,
     consumed_at = NULL,
     created_at = NOW()
-`, auth.UserID, entry.KeyID, entry.PublicKeyJWK); err != nil {
+`, auth.UserID, auth.DeviceID, entry.KeyID, entry.PublicKeyJWK); err != nil {
 			respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to upsert one-time prekeys"})
 			return
 		}
@@ -321,33 +322,7 @@ func (a *App) handleSignalPreKeyBundleFetchInternal(
 	defer tx.Rollback()
 
 	var response SignalPreKeyBundleResponse
-	var identityUpdatedAt time.Time
-	var signedPreKeyUpdatedAt time.Time
-	err = tx.QueryRowContext(ctx, `
-SELECT
-  u.username,
-  ik.identity_key_jwk,
-  ik.identity_signing_public_key_jwk,
-  ik.updated_at,
-  sp.key_id,
-  sp.public_key_jwk,
-  sp.signature,
-  sp.updated_at
-FROM users u
-JOIN signal_identity_keys ik ON ik.user_id = u.id
-JOIN signal_signed_prekeys sp ON sp.user_id = u.id
-WHERE u.id = $1
-`, targetUserID).Scan(
-		&response.Username,
-		&response.IdentityKeyJWK,
-		&response.IdentitySigningPubJWK,
-		&identityUpdatedAt,
-		&response.SignedPreKey.KeyID,
-		&response.SignedPreKey.PublicKeyJWK,
-		&response.SignedPreKey.Signature,
-		&signedPreKeyUpdatedAt,
-	)
-	if err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT username FROM users WHERE id = $1`, targetUserID).Scan(&response.Username); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			respondJSON(w, http.StatusNotFound, map[string]any{"error": "target user prekey bundle is not published"})
 			return
@@ -357,32 +332,105 @@ WHERE u.id = $1
 	}
 	response.UserID = targetUserID
 
+	rows, err := tx.QueryContext(ctx, `
+SELECT
+  d.device_id,
+  ik.identity_key_jwk,
+  ik.identity_signing_public_key_jwk,
+  ik.updated_at,
+  sp.key_id,
+  sp.public_key_jwk,
+  sp.signature,
+  sp.updated_at
+FROM user_devices d
+JOIN signal_device_identity_keys ik
+  ON ik.user_id = d.user_id AND ik.device_id = d.device_id
+JOIN signal_device_signed_prekeys sp
+  ON sp.user_id = d.user_id AND sp.device_id = d.device_id
+WHERE d.user_id = $1
+  AND d.revoked_at IS NULL
+ORDER BY d.last_seen_at DESC, d.device_id ASC
+`, targetUserID)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to load target prekey bundle"})
+		return
+	}
+	defer rows.Close()
+
+	maxUpdatedAt := time.Time{}
+	devices := make([]SignalDevicePreKeyBundle, 0, 8)
+	for rows.Next() {
+		var item SignalDevicePreKeyBundle
+		var identityUpdatedAt time.Time
+		var signedPreKeyUpdatedAt time.Time
+		if err := rows.Scan(
+			&item.DeviceID,
+			&item.IdentityKeyJWK,
+			&item.IdentitySigningPubJWK,
+			&identityUpdatedAt,
+			&item.SignedPreKey.KeyID,
+			&item.SignedPreKey.PublicKeyJWK,
+			&item.SignedPreKey.Signature,
+			&signedPreKeyUpdatedAt,
+		); err != nil {
+			respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to decode target prekey bundle"})
+			return
+		}
+		if signedPreKeyUpdatedAt.After(identityUpdatedAt) {
+			item.UpdatedAt = signedPreKeyUpdatedAt.UTC().Format(time.RFC3339Nano)
+			if signedPreKeyUpdatedAt.After(maxUpdatedAt) {
+				maxUpdatedAt = signedPreKeyUpdatedAt
+			}
+		} else {
+			item.UpdatedAt = identityUpdatedAt.UTC().Format(time.RFC3339Nano)
+			if identityUpdatedAt.After(maxUpdatedAt) {
+				maxUpdatedAt = identityUpdatedAt
+			}
+		}
+		devices = append(devices, item)
+	}
+	if err := rows.Err(); err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to iterate target prekey bundles"})
+		return
+	}
+	if len(devices) == 0 {
+		respondJSON(w, http.StatusNotFound, map[string]any{"error": "target user prekey bundle is not published"})
+		return
+	}
+
 	if consumeOneTimePreKey {
-		var oneTimePreKey SignalOneTimePreKey
-		var createdAt time.Time
-		err = tx.QueryRowContext(ctx, `
+		for index := range devices {
+			var oneTimePreKey SignalOneTimePreKey
+			var createdAt time.Time
+			err := tx.QueryRowContext(ctx, `
 SELECT key_id, public_key_jwk, created_at
-FROM signal_one_time_prekeys
-WHERE user_id = $1 AND consumed_at IS NULL
+FROM signal_device_one_time_prekeys
+WHERE user_id = $1 AND device_id = $2 AND consumed_at IS NULL
 ORDER BY key_id ASC
 LIMIT 1
 FOR UPDATE SKIP LOCKED
-`, targetUserID).Scan(&oneTimePreKey.KeyID, &oneTimePreKey.PublicKeyJWK, &createdAt)
-		if err == nil {
-			now := time.Now().UTC()
-			if _, execErr := tx.ExecContext(ctx, `
-UPDATE signal_one_time_prekeys
-SET consumed_at = $3
-WHERE user_id = $1 AND key_id = $2
-`, targetUserID, oneTimePreKey.KeyID, now); execErr != nil {
-				respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to consume one-time prekey"})
+`, targetUserID, devices[index].DeviceID).Scan(&oneTimePreKey.KeyID, &oneTimePreKey.PublicKeyJWK, &createdAt)
+			if err == nil {
+				now := time.Now().UTC()
+				if _, execErr := tx.ExecContext(ctx, `
+UPDATE signal_device_one_time_prekeys
+SET consumed_at = $4
+WHERE user_id = $1 AND device_id = $2 AND key_id = $3
+`, targetUserID, devices[index].DeviceID, oneTimePreKey.KeyID, now); execErr != nil {
+					respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to consume one-time prekey"})
+					return
+				}
+				oneTimePreKey.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+				devices[index].OneTimePreKey = &oneTimePreKey
+				if now.After(maxUpdatedAt) {
+					maxUpdatedAt = now
+				}
+				continue
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to load one-time prekey"})
 				return
 			}
-			oneTimePreKey.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			response.OneTimePreKey = &oneTimePreKey
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to load one-time prekey"})
-			return
 		}
 	}
 
@@ -391,12 +439,11 @@ WHERE user_id = $1 AND key_id = $2
 		return
 	}
 
-	if signedPreKeyUpdatedAt.After(identityUpdatedAt) {
-		response.UpdatedAt = signedPreKeyUpdatedAt.UTC().Format(time.RFC3339Nano)
-	} else {
-		response.UpdatedAt = identityUpdatedAt.UTC().Format(time.RFC3339Nano)
+	response.Devices = devices
+	if maxUpdatedAt.IsZero() {
+		maxUpdatedAt = time.Now().UTC()
 	}
-
+	response.UpdatedAt = maxUpdatedAt.UTC().Format(time.RFC3339Nano)
 	respondJSON(w, http.StatusOK, response)
 }
 
@@ -417,9 +464,9 @@ func (a *App) handleSignalSafetyNumber(w http.ResponseWriter, r *http.Request, a
 	var localUpdatedAt time.Time
 	if err := a.db.QueryRowContext(ctx, `
 SELECT identity_key_jwk, updated_at
-FROM signal_identity_keys
-WHERE user_id = $1
-`, auth.UserID).Scan(&localIdentityKey, &localUpdatedAt); err != nil {
+FROM signal_device_identity_keys
+WHERE user_id = $1 AND device_id = $2
+`, auth.UserID, auth.DeviceID).Scan(&localIdentityKey, &localUpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			respondJSON(w, http.StatusNotFound, map[string]any{"error": "local identity key is not published"})
 			return
@@ -431,9 +478,14 @@ WHERE user_id = $1
 	var targetIdentityKey json.RawMessage
 	var targetUpdatedAt time.Time
 	if err := a.db.QueryRowContext(ctx, `
-SELECT identity_key_jwk, updated_at
-FROM signal_identity_keys
-WHERE user_id = $1
+SELECT ik.identity_key_jwk, ik.updated_at
+FROM user_devices d
+JOIN signal_device_identity_keys ik
+  ON ik.user_id = d.user_id AND ik.device_id = d.device_id
+WHERE d.user_id = $1
+  AND d.revoked_at IS NULL
+ORDER BY d.last_seen_at DESC, d.device_id ASC
+LIMIT 1
 `, targetUserID).Scan(&targetIdentityKey, &targetUpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			respondJSON(w, http.StatusNotFound, map[string]any{"error": "target identity key is not published"})
@@ -467,7 +519,7 @@ WHERE user_id = $1
 	history := make([]historyEntry, 0, 8)
 	rows, err := a.db.QueryContext(ctx, `
 SELECT fingerprint, first_seen_at, last_seen_at
-FROM signal_identity_key_history
+FROM signal_device_identity_key_history
 WHERE user_id = $1
 ORDER BY first_seen_at DESC
 LIMIT 20

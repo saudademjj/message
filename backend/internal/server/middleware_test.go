@@ -133,7 +133,7 @@ func TestWithAuthRequiresCSRFForCookieAuth(t *testing.T) {
 	t.Parallel()
 
 	app := &App{jwtSecret: []byte("0123456789abcdef0123456789abcdef")}
-	token, err := app.issueToken(1, "alice", "user")
+	token, err := app.issueToken(1, "alice", "user", "device-test-1", 1)
 	if err != nil {
 		t.Fatalf("issue token: %v", err)
 	}

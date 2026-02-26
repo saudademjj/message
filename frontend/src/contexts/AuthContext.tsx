@@ -13,6 +13,12 @@ import type { User } from '../types';
 
 export type AuthSession = {
   user: User;
+  device: {
+    deviceId: string;
+    deviceName: string;
+    sessionVersion: number;
+    lastSeenAt: string;
+  };
 };
 
 type AuthContextValue = {

@@ -9,6 +9,7 @@ import { readSession, writeSession } from './store';
 import type { Identity } from './types';
 import {
   canonicalAckPayloadForSignature,
+  buildRecipientAddress,
   canonicalCipherPayloadForSignature,
   fromBase64,
   requireCryptoSupport,
@@ -19,6 +20,7 @@ import {
   normalizeECDSASignatureForTransport,
   verifyECDSASignatureWithFallback,
 } from './signature';
+import type { RecipientAddress } from './types';
 
 async function signCipherPayload(payload: CipherPayload, privateKey: CryptoKey): Promise<string> {
   const canonical = canonicalCipherPayloadForSignature(payload);
@@ -84,8 +86,9 @@ async function unwrapContentKey(messageKey: ArrayBuffer, wrapped: WrappedKey): P
 export async function encryptForRecipients(
   plaintext: string,
   senderUserID: number,
+  senderDeviceID: string,
   identity: Identity,
-  recipientIDs: number[],
+  recipients: RecipientAddress[],
 ): Promise<CipherPayload> {
   requireCryptoSupport();
   if (!plaintext.trim()) {
@@ -106,28 +109,29 @@ export async function encryptForRecipients(
   const rawMessageKey = await crypto.subtle.exportKey('raw', messageKey);
 
   const wrappedKeys: Record<string, WrappedKey> = {};
-  const missingRecipients: number[] = [];
-  for (const recipientID of recipientIDs) {
-    const numericRecipient = Number(recipientID);
-    if (!Number.isFinite(numericRecipient) || numericRecipient <= 0) {
+  const missingRecipients: string[] = [];
+  for (const recipient of recipients) {
+    const numericRecipient = Number(recipient.userID);
+    const recipientDeviceID = typeof recipient.deviceID === 'string' ? recipient.deviceID.trim() : '';
+    if (!Number.isFinite(numericRecipient) || numericRecipient <= 0 || !recipientDeviceID) {
       continue;
     }
 
-    const session = numericRecipient === senderUserID
-      ? await ensureSelfSession(senderUserID, identity)
-      : await readSession(senderUserID, numericRecipient);
+    const session = numericRecipient === senderUserID && recipientDeviceID === senderDeviceID
+      ? await ensureSelfSession(senderUserID, senderDeviceID, identity)
+      : await readSession(senderUserID, senderDeviceID, numericRecipient, recipientDeviceID);
     if (!session || session.status !== 'ready') {
-      missingRecipients.push(numericRecipient);
+      missingRecipients.push(buildRecipientAddress(numericRecipient, recipientDeviceID));
       continue;
     }
 
     const wrapped = await prepareSendWrappedKey(session, rawMessageKey);
-    wrappedKeys[String(numericRecipient)] = wrapped;
+    wrappedKeys[buildRecipientAddress(numericRecipient, recipientDeviceID)] = wrapped;
     await writeSession(session);
   }
 
   if (missingRecipients.length > 0) {
-    const deduped = [...new Set(missingRecipients)].sort((left, right) => left - right);
+    const deduped = [...new Set(missingRecipients)].sort((left, right) => left.localeCompare(right));
     throw new Error(`missing ready ratchet sessions for recipients: ${deduped.join(',')}`);
   }
 
@@ -136,7 +140,7 @@ export async function encryptForRecipients(
   }
 
   const unsignedPayload: CipherPayload = {
-    version: 2,
+    version: 3,
     ciphertext: toBase64(ciphertext),
     messageIv: toBase64(messageIV),
     wrappedKeys,
@@ -156,7 +160,9 @@ export async function encryptForRecipients(
 export async function decryptPayload(
   payload: CipherPayload,
   localUserID: number,
+  localDeviceID: string,
   senderUserID: number,
+  senderDeviceID: string,
   identity: Identity,
 ): Promise<string> {
   requireCryptoSupport();
@@ -172,7 +178,7 @@ export async function decryptPayload(
     }
   }
 
-  const wrapped = payload.wrappedKeys[String(localUserID)];
+  const wrapped = payload.wrappedKeys[buildRecipientAddress(localUserID, localDeviceID)];
   if (!wrapped) {
     throw new Error('no wrapped key for this user');
   }
@@ -181,19 +187,27 @@ export async function decryptPayload(
     throw new Error('legacy encryption payload is no longer supported');
   }
 
-  let session = senderUserID === localUserID
-    ? await ensureSelfSession(localUserID, identity)
-    : await readSession(localUserID, senderUserID);
+  let session = senderUserID === localUserID && senderDeviceID === localDeviceID
+    ? await ensureSelfSession(localUserID, localDeviceID, identity)
+    : await readSession(localUserID, localDeviceID, senderUserID, senderDeviceID);
 
-  if (!session && senderUserID !== localUserID && wrapped.preKeyMessage) {
-    session = await bootstrapSessionFromPreKeyMessage(localUserID, senderUserID, identity, wrapped);
+  if (!session && wrapped.preKeyMessage) {
+    session = await bootstrapSessionFromPreKeyMessage(
+      localUserID,
+      localDeviceID,
+      senderUserID,
+      senderDeviceID,
+      identity,
+      wrapped,
+    );
   }
 
   if (!session || session.status !== 'ready') {
-    throw new Error(`double-ratchet session missing with sender ${senderUserID}`);
+    throw new Error(`double-ratchet session missing with sender ${senderUserID}:${senderDeviceID}`);
   }
 
-  if (senderUserID !== localUserID) {
+  const isLocalSelfSender = senderUserID === localUserID && senderDeviceID === localDeviceID;
+  if (!isLocalSelfSender) {
     if (!payload.senderSigningPublicKeyJwk && !session.peerIdentitySigningPublicKeyJwk) {
       throw new Error('double-ratchet session is missing peer signing identity');
     }
@@ -206,11 +220,7 @@ export async function decryptPayload(
       }
     }
   }
-  if (
-    senderUserID === localUserID
-    && payload.senderSigningPublicKeyJwk
-    && signingKeyFingerprint(payload.senderSigningPublicKeyJwk) !== signingKeyFingerprint(identity.signingPublicKeyJwk)
-  ) {
+  if (isLocalSelfSender && payload.senderSigningPublicKeyJwk && signingKeyFingerprint(payload.senderSigningPublicKeyJwk) !== signingKeyFingerprint(identity.signingPublicKeyJwk)) {
     // Warn but don't throw: recovery payloads or key migrations may carry a stale signing key
     console.warn('[decrypt] local signing key fingerprint mismatch – proceeding with caution');
   }
@@ -224,13 +234,21 @@ export async function decryptPayload(
 
   let rawContentKey: ArrayBuffer;
   try {
-    rawContentKey = await decryptWithSession(session);
+    const sessionCopy = { ...session, skipped: { ...session.skipped } };
+    rawContentKey = await decryptWithSession(sessionCopy);
   } catch (primaryReason) {
     // Recovery payloads and forced rekey payloads may carry pre-key headers that should
     // bootstrap a fresh session if the local state is stale.
-    if (senderUserID !== localUserID && wrapped.preKeyMessage) {
+    if (!isLocalSelfSender && wrapped.preKeyMessage) {
       try {
-        const bootstrapSession = await bootstrapSessionFromPreKeyMessage(localUserID, senderUserID, identity, wrapped);
+        const bootstrapSession = await bootstrapSessionFromPreKeyMessage(
+          localUserID,
+          localDeviceID,
+          senderUserID,
+          senderDeviceID,
+          identity,
+          wrapped,
+        );
         rawContentKey = await decryptWithSession(bootstrapSession);
       } catch {
         throw primaryReason;
