@@ -537,7 +537,7 @@ export function useMessages({
       if (message.revokedAt) {
         return {
           ...message,
-          plaintext: '[消息已撤回]',
+          plaintext: '',
           decryptState: 'ok',
           pendingWidthPx,
         };
@@ -1455,6 +1455,7 @@ export function useMessages({
     }
     return messages
       .filter((message) => message.decryptState === 'ok')
+      .filter((message) => !message.revokedAt)
       .filter((message) => {
         const senderMatched = message.senderUsername.toLowerCase().includes(query);
         if (senderMatched) {

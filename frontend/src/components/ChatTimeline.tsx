@@ -172,6 +172,25 @@ export const ChatTimeline = memo(function ChatTimeline({
 
         const message = item.message;
         const own = message.senderId === authUserID;
+        if (message.revokedAt) {
+          const revokedEventClassName = [
+            'message-system-event',
+            'revoke-event',
+            highlightedMessageID === message.id ? 'jump-highlight' : '',
+          ].filter(Boolean).join(' ');
+          return (
+            <div className={shellClassName} key={item.key}>
+              <div
+                className={revokedEventClassName}
+                id={`message-${message.id}`}
+                data-message-id={message.id}
+              >
+                <span>{own ? '你已撤回一条消息' : '对方已撤回一条消息'}</span>
+              </div>
+            </div>
+          );
+        }
+
         const classes = ['bubble'];
         if (own) {
           classes.push('own');
