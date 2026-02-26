@@ -199,7 +199,7 @@
 .bubble-main {
     background: var(--bg-elevated);
     border-radius: 4px 18px 18px 18px;
-    padding: 8px 12px;
+    padding: 6px 11px;
     border: none;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
     position: relative;
@@ -320,7 +320,7 @@
     font-size: 0.65rem;
     white-space: nowrap;
     opacity: 0.7;
-    margin-bottom: 4px;
+    margin-bottom: 1px;
 }
 
 .bubble-meta-external.own {
@@ -429,13 +429,13 @@ mark.search-highlight {
 .bubble-body {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 0;
     overflow: visible;
 }
 
 .bubble-text {
     margin: 0;
-    line-height: 1.5;
+    line-height: 1.42;
     white-space: pre-wrap;
     word-break: break-word;
     font-size: 0.86rem;
@@ -537,7 +537,7 @@ mark.search-highlight {
 }
 
 .markdown-body {
-    line-height: 1.5;
+    line-height: 1.42;
     font-size: 0.86rem;
     white-space: pre-wrap;
     word-break: break-word;
@@ -608,20 +608,12 @@ mark.search-highlight {
     top: -4px;
 }
 
-.markdown-body :first-child {
-    margin-top: 0;
+.markdown-body>* {
+    margin: 0;
 }
 
-.markdown-body :last-child {
-    margin-bottom: 0;
-}
-
-.markdown-body p,
-.markdown-body ul,
-.markdown-body ol,
-.markdown-body pre,
-.markdown-body blockquote {
-    margin: 0 0 4px;
+.markdown-body>*+* {
+    margin-top: 4px;
 }
 
 .markdown-body ul,
