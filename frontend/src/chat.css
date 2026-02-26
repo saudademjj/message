@@ -3,12 +3,8 @@
 ========================================= */
 
 .message-list {
-    background-color: #efeae2;
-    background-image:
-        radial-gradient(rgba(17, 27, 33, 0.03) 0.8px, transparent 0.8px),
-        radial-gradient(rgba(17, 27, 33, 0.02) 0.8px, transparent 0.8px);
-    background-position: 0 0, 12px 12px;
-    background-size: 24px 24px;
+    background-color: #ffffff;
+    background-image: none;
     border-radius: 10px;
     border: none;
     box-shadow: none;
