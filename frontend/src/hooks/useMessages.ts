@@ -31,6 +31,7 @@ import {
 import { useTimelineItems } from './useTimelineItems';
 import { useChatStore } from '../stores/chatStore';
 import { loadCachedPlaintexts, persistDecryptedPlaintext } from '../secureMessageStore';
+import { readOutgoingPlaintext } from '../outgoingPlaintextCache';
 import type {
   ChatMessage,
   DecryptAckFrame,
@@ -381,6 +382,62 @@ export function useMessages({
     }
   }, [auth, selectedRoomID, roomMembers, registerReadReceiptUpTo]);
 
+  const requestDecryptRecoveryIfNeeded = useCallback((message: Pick<ChatMessage, 'id' | 'senderId'>) => {
+    if (!auth || !selectedRoomID) {
+      return;
+    }
+    const messageID = Number(message.id);
+    const senderUserID = Number(message.senderId);
+    if (
+      !Number.isFinite(messageID) ||
+      messageID <= 0 ||
+      !Number.isFinite(senderUserID) ||
+      senderUserID <= 0 ||
+      senderUserID === auth.user.id
+    ) {
+      return;
+    }
+    const requestKey = buildRecoveryRequestKey({
+      roomId: selectedRoomID,
+      fromUserId: auth.user.id,
+      messageId: messageID,
+    });
+    if (pendingResyncRecoveryRef.current.has(requestKey)) {
+      return;
+    }
+
+    const request: DecryptRecoveryRequestFrame = {
+      type: 'decrypt_recovery_request',
+      roomId: selectedRoomID,
+      toUserId: senderUserID,
+      fromUserId: auth.user.id,
+      fromUsername: auth.user.username,
+      messageId: messageID,
+      action: 'resync',
+    };
+    pendingResyncRecoveryRef.current.set(requestKey, request);
+    const sent = sendJSON({
+      type: 'decrypt_recovery_request',
+      messageId: messageID,
+      action: 'resync',
+    });
+    if (!sent) {
+      pendingResyncRecoveryRef.current.delete(requestKey);
+    }
+  }, [auth, selectedRoomID, sendJSON]);
+
+  const clearPendingRecoveryRequest = useCallback((messageID: number) => {
+    if (!auth || !selectedRoomID || messageID <= 0) {
+      return;
+    }
+    const requestKey = buildRecoveryRequestKey({
+      roomId: selectedRoomID,
+      fromUserId: auth.user.id,
+      messageId: messageID,
+    });
+    pendingResyncRecoveryRef.current.delete(requestKey);
+  }, [auth, selectedRoomID]);
+
   const emitTypingStatus = useCallback((isTyping: boolean) => {
     if (!auth || !selectedRoomID || !wsConnected) {
       return;
@@ -577,6 +634,25 @@ export function useMessages({
           pendingWidthPx,
         };
       } catch {
+        if (
+          auth.user.id === message.senderId &&
+          typeof message.payload?.signature === 'string' &&
+          message.payload.signature.trim()
+        ) {
+          const fallbackPlaintext = readOutgoingPlaintext(
+            auth.user.id,
+            message.roomId,
+            message.payload.signature,
+          );
+          if (fallbackPlaintext) {
+            return {
+              ...message,
+              plaintext: fallbackPlaintext,
+              decryptState: 'ok',
+              pendingWidthPx,
+            };
+          }
+        }
         return {
           ...message,
           plaintext: '这条消息未对当前设备加密，暂时无法查看。',
@@ -644,6 +720,9 @@ export function useMessages({
         return;
       }
       if (resolved.decryptState === 'ok') {
+        if (auth && resolved.senderId !== auth.user.id) {
+          clearPendingRecoveryRequest(resolved.id);
+        }
         queueDecryptAck(resolved);
         if (auth && resolved.senderId !== auth.user.id && stickToBottomRef.current) {
           emitReadReceipt(resolved.id);
@@ -651,9 +730,20 @@ export function useMessages({
         if (options.notify) {
           notifyIncomingMessage(resolved);
         }
+      } else if (auth && resolved.senderId !== auth.user.id) {
+        requestDecryptRecoveryIfNeeded(resolved);
       }
     },
-    [auth, decryptMessageView, queueDecryptAck, emitReadReceipt, notifyIncomingMessage, setMessages],
+    [
+      auth,
+      decryptMessageView,
+      queueDecryptAck,
+      emitReadReceipt,
+      notifyIncomingMessage,
+      setMessages,
+      clearPendingRecoveryRequest,
+      requestDecryptRecoveryIfNeeded,
+    ],
   );
 
   const upsertIncomingMessage = useCallback((message: ChatMessage) => {
@@ -1257,50 +1347,30 @@ export function useMessages({
     }
     const failedMessages = messagesRef.current.filter(
       (msg) => msg.decryptState === 'failed' && msg.roomId === selectedRoomID,
-    );
+    ).slice(-20);
     if (failedMessages.length === 0) {
       return;
     }
     for (const message of failedMessages) {
-      // Only re-attempt decryption if the message payload has a wrapped key for this user.
-      // If no wrapped key exists, the message was encrypted before this user joined the room
-      // and we should request recovery from the sender instead.
       const hasWrappedKey = message.payload?.wrappedKeys?.[String(auth.user.id)];
       if (hasWrappedKey) {
         void enqueueDecryptTask(async () => {
           await decryptAndUpdate(message);
         });
-      } else if (
-        message.senderId !== auth.user.id &&
-        !pendingResyncRecoveryRef.current.has(
-          buildRecoveryRequestKey({
-            roomId: selectedRoomID,
-            fromUserId: auth.user.id,
-            messageId: message.id,
-          }),
-        )
-      ) {
-        const recoveryKey = buildRecoveryRequestKey({
-          roomId: selectedRoomID,
-          fromUserId: auth.user.id,
-          messageId: message.id,
-        });
-        pendingResyncRecoveryRef.current.set(recoveryKey, {
-          roomId: selectedRoomID,
-          toUserId: message.senderId,
-          fromUserId: auth.user.id,
-          fromUsername: auth.user.username,
-          messageId: message.id,
-          action: 'resync',
-        } as DecryptRecoveryRequestFrame);
-        sendJSON({
-          type: 'decrypt_recovery_request',
-          messageId: message.id,
-          action: 'resync',
-        });
+      }
+      if (message.senderId !== auth.user.id) {
+        requestDecryptRecoveryIfNeeded(message);
       }
     }
-  }, [auth, identity, selectedRoomID, handshakeTick, decryptAndUpdate, enqueueDecryptTask, sendJSON]);
+  }, [
+    auth,
+    identity,
+    selectedRoomID,
+    handshakeTick,
+    decryptAndUpdate,
+    enqueueDecryptTask,
+    requestDecryptRecoveryIfNeeded,
+  ]);
 
   useLayoutEffect(() => {
     const list = messageListRef.current;
