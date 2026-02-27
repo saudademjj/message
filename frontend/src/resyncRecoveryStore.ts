@@ -1,7 +1,7 @@
 type ResyncDedupeSnapshot = Record<string, number>;
 
 const STORAGE_KEY = 'e2ee-chat:resync-recovery-dedupe:v1';
-const COOLDOWN_MS = 12 * 60 * 60 * 1000;
+const COOLDOWN_MS = 2 * 60 * 1000;
 const MAX_ENTRIES = 3000;
 
 const dedupeCache = new Map<string, number>();

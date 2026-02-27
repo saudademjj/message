@@ -73,14 +73,14 @@ type Hub struct {
 }
 
 type Client struct {
-	app      *App
-	conn     *websocket.Conn
-	send     chan []byte
-	userID   int64
-	username string
-	deviceID string
+	app        *App
+	conn       *websocket.Conn
+	send       chan []byte
+	userID     int64
+	username   string
+	deviceID   string
 	deviceName string
-	roomID   int64
+	roomID     int64
 
 	mu               sync.RWMutex
 	publicKey        json.RawMessage
@@ -157,6 +157,13 @@ type WSIncoming struct {
 	IdentitySigningPubJWK json.RawMessage       `json:"identitySigningPublicKeyJwk,omitempty"`
 }
 
+type ProtocolErrorFrame struct {
+	Type    string `json:"type"`
+	RoomID  int64  `json:"roomId"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 type SignalSignedPreKey struct {
 	KeyID        int64           `json:"keyId"`
 	PublicKeyJWK json.RawMessage `json:"publicKeyJwk"`
@@ -187,20 +194,20 @@ type SignalDevicePreKeyBundle struct {
 }
 
 type SignalPreKeyBundleResponse struct {
-	UserID    int64                    `json:"userId"`
-	Username  string                   `json:"username"`
+	UserID    int64                      `json:"userId"`
+	Username  string                     `json:"username"`
 	Devices   []SignalDevicePreKeyBundle `json:"devices"`
-	UpdatedAt string                   `json:"updatedAt"`
+	UpdatedAt string                     `json:"updatedAt"`
 }
 
 type DeviceSnapshot struct {
-	DeviceID      string `json:"deviceId"`
-	DeviceName    string `json:"deviceName"`
-	SessionVersion int   `json:"sessionVersion"`
-	CreatedAt     string `json:"createdAt"`
-	LastSeenAt    string `json:"lastSeenAt"`
-	RevokedAt     *string `json:"revokedAt,omitempty"`
-	Current       bool   `json:"current"`
+	DeviceID       string  `json:"deviceId"`
+	DeviceName     string  `json:"deviceName"`
+	SessionVersion int     `json:"sessionVersion"`
+	CreatedAt      string  `json:"createdAt"`
+	LastSeenAt     string  `json:"lastSeenAt"`
+	RevokedAt      *string `json:"revokedAt,omitempty"`
+	Current        bool    `json:"current"`
 }
 
 type StoredMessage struct {

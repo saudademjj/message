@@ -192,3 +192,10 @@ export interface MessageUpdateFrame {
   revokedAt?: string;
   payload?: CipherPayload;
 }
+
+export interface ProtocolErrorFrame {
+  type: 'protocol_error';
+  roomId: number;
+  code: 'legacy_payload_not_supported' | 'invalid_payload_format';
+  message: string;
+}
