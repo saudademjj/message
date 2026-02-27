@@ -6,6 +6,42 @@ import (
 	"testing"
 )
 
+func TestDecideDirectJoin(t *testing.T) {
+	t.Parallel()
+
+	if decision := decideDirectJoin("admin", true); !decision.Allowed {
+		t.Fatalf("expected admin to join system room")
+	}
+	if decision := decideDirectJoin("admin", false); !decision.Allowed {
+		t.Fatalf("expected admin to join normal room")
+	}
+
+	userSystem := decideDirectJoin("user", true)
+	if userSystem.Allowed || userSystem.Code != "system_room_admin_only" {
+		t.Fatalf("unexpected decision for user/system room: %#v", userSystem)
+	}
+
+	userNormal := decideDirectJoin("user", false)
+	if userNormal.Allowed || userNormal.Code != "invite_required" {
+		t.Fatalf("unexpected decision for user/normal room: %#v", userNormal)
+	}
+}
+
+func TestDecideSystemRoomAccess(t *testing.T) {
+	t.Parallel()
+
+	if decision := decideSystemRoomAccess("admin", true); !decision.Allowed {
+		t.Fatalf("expected admin system-room access")
+	}
+	if decision := decideSystemRoomAccess("user", false); !decision.Allowed {
+		t.Fatalf("expected non-system room access for user")
+	}
+	userSystem := decideSystemRoomAccess("user", true)
+	if userSystem.Allowed || userSystem.Code != "system_room_admin_only" {
+		t.Fatalf("unexpected decision for user/system room: %#v", userSystem)
+	}
+}
+
 func TestHandleRoomSubroutesGuards(t *testing.T) {
 	t.Parallel()
 

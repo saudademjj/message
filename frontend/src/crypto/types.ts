@@ -86,16 +86,6 @@ export type RotationResult = {
   rotated: boolean;
 };
 
-export type RatchetHandshakeOutgoing = {
-  type: 'dr_handshake';
-  toUserId: number;
-  step: 'init' | 'ack';
-  sessionVersion: number;
-  ratchetDhPublicKeyJwk: JsonWebKey;
-  identityPublicKeyJwk: JsonWebKey;
-  identitySigningPublicKeyJwk: JsonWebKey;
-};
-
 export type RatchetSessionStatus = {
   readyRecipients: RecipientAddress[];
   pendingUserIDs: number[];

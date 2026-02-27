@@ -5,6 +5,7 @@ type RoomModalProps = {
   open: boolean;
   mode: 'create' | 'join';
   busy: boolean;
+  allowDirectJoin: boolean;
   newRoomName: string;
   joinRoomID: string;
   modalRef: RefObject<HTMLElement | null>;
@@ -20,6 +21,7 @@ export function RoomModal({
   open,
   mode,
   busy,
+  allowDirectJoin,
   newRoomName,
   joinRoomID,
   modalRef,
@@ -83,11 +85,11 @@ export function RoomModal({
         ) : (
           <form className={`${styles.stack} ${styles.form}`} onSubmit={onJoinRoom}>
             <label>
-              输入房间 ID 或粘贴邀请链接
+              {allowDirectJoin ? '输入邀请链接（推荐）或房间 ID（仅管理员）' : '粘贴邀请链接或邀请令牌'}
               <input
                 value={joinRoomID}
                 onChange={(event) => onJoinRoomIDChange(event.target.value)}
-                placeholder="例如 1 或 https://...#invite=..."
+                placeholder={allowDirectJoin ? '例如 https://...#invite=... 或 123' : '例如 https://...#invite=...'}
                 required
               />
             </label>

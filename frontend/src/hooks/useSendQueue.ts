@@ -15,7 +15,9 @@ type ValueOrUpdater<T> = T | ((previous: T) => T);
 
 type UseSendQueueArgs = {
   authUserID: number | null;
+  authDeviceID: string | null;
   identity: Identity | null;
+  identityBound: boolean;
   selectedRoomID: number | null;
   wsConnected: boolean;
   setRoomMembers: (next: ValueOrUpdater<User[]>) => void;
@@ -75,7 +77,9 @@ function createQueueItemID(): string {
 
 export function useSendQueue({
   authUserID,
+  authDeviceID,
   identity,
+  identityBound,
   selectedRoomID,
   wsConnected,
   setRoomMembers,
@@ -124,7 +128,10 @@ export function useSendQueue({
     if (queueBusyRef.current) {
       return;
     }
-    if (!authUserID || !identity || !selectedRoomID) {
+    if (!authUserID || !authDeviceID || !identity || !identityBound || !selectedRoomID) {
+      if (!identityBound) {
+        setError('本地安全身份与当前会话不一致，请刷新页面后重新登录');
+      }
       return;
     }
     if (!wsConnected) {
@@ -173,7 +180,7 @@ export function useSendQueue({
 
         const sessionStatus = await ensureRatchetSessionsForRecipients(
           authUserID,
-          identity.activeKeyID,
+          authDeviceID,
           identity,
           recipientUserIDs,
           resolveSignalBundle,
@@ -187,7 +194,7 @@ export function useSendQueue({
         const payload = await encryptForRecipients(
           target.text,
           authUserID,
-          identity.activeKeyID,
+          authDeviceID,
           identity,
           sessionStatus.readyRecipients,
         );
@@ -241,8 +248,10 @@ export function useSendQueue({
     }
   }, [
     apiListRoomMembers,
+    authDeviceID,
     authUserID,
     identity,
+    identityBound,
     replaceQueue,
     reportError,
     resolveSignalBundle,
@@ -288,7 +297,7 @@ export function useSendQueue({
   }, [flushSendQueue, handshakeTick, peers, sendQueue, wsConnected]);
 
   useEffect(() => {
-    if (!identity || !wsConnected) {
+    if (!identity || !identityBound || !wsConnected) {
       return;
     }
     const pending = sendQueueRef.current.filter((item) => item.status === 'failed');
@@ -302,7 +311,7 @@ export function useSendQueue({
           : item,
       ),
     );
-  }, [identity, replaceQueue, wsConnected]);
+  }, [identity, identityBound, replaceQueue, wsConnected]);
 
   const failedQueueItems = useMemo(
     () => sendQueue.filter((item) => item.status === 'failed'),

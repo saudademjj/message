@@ -1,4 +1,4 @@
-import type { RatchetHandshakeFrame, WrappedKey } from '../types';
+import type { WrappedKey } from '../types';
 import {
   DR_MAX_SKIP,
   DR_RK_INFO,
@@ -17,7 +17,6 @@ import { deleteSession, readSession, writeSession } from './store';
 import type {
   Identity,
   RecipientAddress,
-  RatchetHandshakeOutgoing,
   RatchetSessionRecord,
   RatchetSessionStatus,
   SignalBundleResolver,
@@ -39,28 +38,13 @@ import { verifyECDSASignatureWithFallback } from './signature';
 async function generateRatchetKeyPair(): Promise<{ privateKey: CryptoKey; publicKey: CryptoKey; publicKeyJwk: JsonWebKey }> {
   const generated = await crypto.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' },
-    true,
+    false,
     ['deriveBits'],
   ) as CryptoKeyPair;
-  const privateKeyJwk = await crypto.subtle.exportKey('jwk', generated.privateKey);
   const publicKeyJwk = await crypto.subtle.exportKey('jwk', generated.publicKey);
-  const privateKey = await crypto.subtle.importKey(
-    'jwk',
-    privateKeyJwk,
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    ['deriveBits'],
-  );
-  const publicKey = await crypto.subtle.importKey(
-    'jwk',
-    publicKeyJwk,
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    [],
-  );
   return {
-    privateKey,
-    publicKey,
+    privateKey: generated.privateKey,
+    publicKey: generated.publicKey,
     publicKeyJwk,
   };
 }
@@ -653,18 +637,4 @@ export async function resetRatchetSession(
   peerDeviceID: string,
 ): Promise<void> {
   await deleteSession(localUserID, localDeviceID, peerUserID, peerDeviceID);
-}
-
-export async function handleRatchetHandshakeFrame(
-  _localUserID: number,
-  _identity: Identity,
-  _frame: RatchetHandshakeFrame,
-  _emitHandshake: (outgoing: RatchetHandshakeOutgoing) => void,
-): Promise<boolean> {
-  void _localUserID;
-  void _identity;
-  void _frame;
-  void _emitHandshake;
-  // Signal core mode relies on X3DH prekey bundles; websocket handshakes are ignored.
-  return false;
 }

@@ -68,6 +68,15 @@ export function formatError(reason: unknown, fallback: string): string | null {
       return '网络连接异常，请检查网络后重试';
     }
     if (reason.code === 'http') {
+      if (reason.serverCode === 'invite_required') {
+        return '需要邀请链接才能加入该房间';
+      }
+      if (reason.serverCode === 'system_room_admin_only') {
+        return '系统房间仅管理员可加入';
+      }
+      if (reason.serverCode === 'room_name_conflict') {
+        return '房间名已存在，请更换后重试';
+      }
       if (reason.status === 401) {
         const normalized = reason.message.trim().toLowerCase();
         if (normalized.includes('invalid credentials')) {

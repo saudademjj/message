@@ -10,6 +10,7 @@ type FailedQueueItem = {
 type UseChatRouteViewModelArgs = {
   wsConnected: boolean;
   reconnectCountdownSec: number | null;
+  wsAuthProbeFailed: boolean;
   identity: Identity | null;
   failedQueueItems: FailedQueueItem[];
   roomSearchQuery: string;
@@ -21,6 +22,7 @@ type UseChatRouteViewModelArgs = {
 export function useChatRouteViewModel({
   wsConnected,
   reconnectCountdownSec,
+  wsAuthProbeFailed,
   identity,
   failedQueueItems,
   roomSearchQuery,
@@ -30,9 +32,11 @@ export function useChatRouteViewModel({
 }: UseChatRouteViewModelArgs) {
   const wsStateText = wsConnected
     ? 'SECURE LINK ONLINE'
-    : reconnectCountdownSec !== null
-      ? `正在尝试重新连接 (${reconnectCountdownSec}s)...`
-      : 'SECURE LINK OFFLINE';
+    : wsAuthProbeFailed
+      ? '登录已失效，请重新登录'
+      : reconnectCountdownSec !== null
+        ? `正在尝试重新连接 (${reconnectCountdownSec}s)...`
+        : 'SECURE LINK OFFLINE';
 
   const wsStateClass = wsConnected
     ? 'online'

@@ -62,8 +62,8 @@ func TestClientKeyFromRequest(t *testing.T) {
 	t.Run("trusted proxy uses forwarded for", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 		request.RemoteAddr = "10.0.0.2:1234"
-		request.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.2")
-		if got := clientKeyFromRequest(request, true); got != "203.0.113.9" {
+		request.Header.Set("X-Forwarded-For", "203.0.113.9, 198.51.100.44")
+		if got := clientKeyFromRequest(request, true); got != "198.51.100.44" {
 			t.Fatalf("unexpected key: %q", got)
 		}
 	})

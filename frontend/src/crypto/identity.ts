@@ -23,26 +23,6 @@ import {
 } from './utils';
 import { normalizeECDSASignatureForTransport } from './signature';
 
-async function importECDHPrivateKey(jwk: JsonWebKey): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'jwk',
-    jwk,
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    ['deriveBits'],
-  );
-}
-
-async function importECDHPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'jwk',
-    jwk,
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    [],
-  );
-}
-
 async function generateECDHKeyPair(): Promise<{
   privateKey: CryptoKey;
   publicKey: CryptoKey;
@@ -50,16 +30,13 @@ async function generateECDHKeyPair(): Promise<{
 }> {
   const generated = await crypto.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' },
-    true,
+    false,
     ['deriveBits'],
   ) as CryptoKeyPair;
-  const privateKeyJwk = await crypto.subtle.exportKey('jwk', generated.privateKey);
   const publicKeyJwk = await crypto.subtle.exportKey('jwk', generated.publicKey);
-  const privateKey = await importECDHPrivateKey(privateKeyJwk);
-  const publicKey = await importECDHPublicKey(publicKeyJwk);
   return {
-    privateKey,
-    publicKey,
+    privateKey: generated.privateKey,
+    publicKey: generated.publicKey,
     publicKeyJwk,
   };
 }
@@ -71,28 +48,13 @@ async function generateSigningKeyMaterial(): Promise<{
 }> {
   const generated = await crypto.subtle.generateKey(
     { name: 'ECDSA', namedCurve: 'P-256' },
-    true,
+    false,
     ['sign', 'verify'],
   ) as CryptoKeyPair;
   const publicKeyJwk = await crypto.subtle.exportKey('jwk', generated.publicKey);
-  const privateKeyJwk = await crypto.subtle.exportKey('jwk', generated.privateKey);
-  const signingPrivateKey = await crypto.subtle.importKey(
-    'jwk',
-    privateKeyJwk,
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    true,
-    ['sign'],
-  );
-  const signingPublicKey = await crypto.subtle.importKey(
-    'jwk',
-    publicKeyJwk,
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    true,
-    ['verify'],
-  );
   return {
-    privateKey: signingPrivateKey,
-    publicKey: signingPublicKey,
+    privateKey: generated.privateKey,
+    publicKey: generated.publicKey,
     publicKeyJwk,
   };
 }
@@ -138,23 +100,6 @@ function signedPreKeyAgeMs(entry: PersistedSignedPreKey): number {
     return Number.MAX_SAFE_INTEGER;
   }
   return Math.max(0, Date.now() - parsed);
-}
-
-function hasPersistablePrivateKeys(record: PersistedIdentityRecord): boolean {
-  if (!record.identityPrivateKey.extractable || !record.signingPrivateKey.extractable) {
-    return false;
-  }
-  for (const signedPreKey of record.signedPreKeys) {
-    if (!signedPreKey.privateKey.extractable) {
-      return false;
-    }
-  }
-  for (const oneTimePreKey of record.oneTimePreKeys) {
-    if (!oneTimePreKey.privateKey.extractable) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function toIdentity(record: PersistedIdentityRecord): Identity {
@@ -220,14 +165,6 @@ async function ensureIdentityRecord(
       return { record: patched, changed: true };
     }
     return { record: created, changed: true };
-  }
-
-  if (!hasPersistablePrivateKeys(existing)) {
-    await deleteAllSessionsForUser(userID);
-    return {
-      record: await createIdentityRecord(userID),
-      changed: true,
-    };
   }
 
   let changed = false;

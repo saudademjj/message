@@ -11,6 +11,49 @@ import (
 	"time"
 )
 
+type roomAccessDecision struct {
+	Allowed bool
+	Code    string
+	Error   string
+}
+
+func decideDirectJoin(role string, isSystem bool) roomAccessDecision {
+	if role == "admin" {
+		return roomAccessDecision{Allowed: true}
+	}
+	if isSystem {
+		return roomAccessDecision{
+			Allowed: false,
+			Code:    "system_room_admin_only",
+			Error:   "system room can only be joined by admin",
+		}
+	}
+	return roomAccessDecision{
+		Allowed: false,
+		Code:    "invite_required",
+		Error:   "direct room join is disabled; use invite link",
+	}
+}
+
+func decideSystemRoomAccess(role string, isSystem bool) roomAccessDecision {
+	if !isSystem || role == "admin" {
+		return roomAccessDecision{Allowed: true}
+	}
+	return roomAccessDecision{
+		Allowed: false,
+		Code:    "system_room_admin_only",
+		Error:   "system room can only be managed by admin",
+	}
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	value := strings.ToLower(err.Error())
+	return strings.Contains(value, "duplicate key value") || strings.Contains(value, "sqlstate 23505")
+}
+
 func (a *App) handleRooms(w http.ResponseWriter, r *http.Request, auth AuthContext) {
 	switch r.Method {
 	case http.MethodGet:
@@ -63,6 +106,9 @@ ORDER BY r.id ASC
 			return
 		}
 
+		var roomID int64
+		var roomName string
+		var createdAt time.Time
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 		tx, err := a.db.BeginTx(ctx, nil)
@@ -71,17 +117,19 @@ ORDER BY r.id ASC
 			return
 		}
 		defer tx.Rollback()
-
-		var roomID int64
-		var roomName string
-		var createdAt time.Time
 		err = tx.QueryRowContext(ctx, `
 INSERT INTO rooms(name, created_by)
 VALUES ($1, $2)
-ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
 RETURNING id, name, created_at
 `, req.Name, auth.UserID).Scan(&roomID, &roomName, &createdAt)
 		if err != nil {
+			if isUniqueViolation(err) {
+				respondJSON(w, http.StatusConflict, map[string]any{
+					"error": "room name already exists",
+					"code":  "room_name_conflict",
+				})
+				return
+			}
 			respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to create room"})
 			return
 		}
@@ -99,7 +147,7 @@ RETURNING id, name, created_at
 			return
 		}
 
-		respondJSON(w, http.StatusOK, map[string]any{
+		respondJSON(w, http.StatusCreated, map[string]any{
 			"room": map[string]any{
 				"id":        roomID,
 				"name":      roomName,
@@ -204,13 +252,22 @@ func (a *App) handleJoinRoom(w http.ResponseWriter, r *http.Request, auth AuthCo
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-
-	if err := a.ensureRoomExists(ctx, roomID); err != nil {
+	var isSystem bool
+	if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(is_system, FALSE) FROM rooms WHERE id = $1`, roomID).Scan(&isSystem); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			respondJSON(w, http.StatusNotFound, map[string]any{"error": "room not found"})
 			return
 		}
-		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to verify room"})
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to load room"})
+		return
+	}
+
+	decision := decideDirectJoin(auth.Role, isSystem)
+	if !decision.Allowed {
+		respondJSON(w, http.StatusForbidden, map[string]any{
+			"error": decision.Error,
+			"code":  decision.Code,
+		})
 		return
 	}
 
@@ -240,6 +297,23 @@ func (a *App) handleRoomInvite(w http.ResponseWriter, r *http.Request, auth Auth
 			return
 		}
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to validate room membership"})
+		return
+	}
+	var isSystem bool
+	if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(is_system, FALSE) FROM rooms WHERE id = $1`, roomID).Scan(&isSystem); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			respondJSON(w, http.StatusNotFound, map[string]any{"error": "room not found"})
+			return
+		}
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to load room"})
+		return
+	}
+	decision := decideSystemRoomAccess(auth.Role, isSystem)
+	if !decision.Allowed {
+		respondJSON(w, http.StatusForbidden, map[string]any{
+			"error": decision.Error,
+			"code":  decision.Code,
+		})
 		return
 	}
 
@@ -288,16 +362,25 @@ func (a *App) handleInviteJoin(w http.ResponseWriter, r *http.Request, auth Auth
 	var roomID int64
 	var roomName string
 	var createdAt time.Time
+	var isSystem bool
 	err = a.db.QueryRowContext(ctx,
-		`SELECT id, name, created_at FROM rooms WHERE id = $1`,
+		`SELECT id, name, created_at, COALESCE(is_system, FALSE) FROM rooms WHERE id = $1`,
 		claims.RoomID,
-	).Scan(&roomID, &roomName, &createdAt)
+	).Scan(&roomID, &roomName, &createdAt, &isSystem)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			respondJSON(w, http.StatusNotFound, map[string]any{"error": "room not found"})
 			return
 		}
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to load room"})
+		return
+	}
+	decision := decideSystemRoomAccess(auth.Role, isSystem)
+	if !decision.Allowed {
+		respondJSON(w, http.StatusForbidden, map[string]any{
+			"error": decision.Error,
+			"code":  decision.Code,
+		})
 		return
 	}
 

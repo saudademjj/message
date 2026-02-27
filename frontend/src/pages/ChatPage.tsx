@@ -248,7 +248,7 @@ export function ChatPage({
             + 新建房间
           </button>
           <button className="ghost-btn room-action-btn" onClick={() => openRoomModal('join')} type="button">
-            + 加入房间
+            + 邀请加入
           </button>
           {authUser.role === 'admin' ? (
             <button className="ghost-btn room-action-btn admin-launch-btn" onClick={openAdminModal} type="button">
