@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,97 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+var (
+	errLegacyPayloadVersion = errors.New("legacy payload version is not supported")
+	errInvalidPayloadFormat = errors.New("invalid payload format")
+)
+
+const (
+	protocolErrorLegacyPayload = "legacy_payload_not_supported"
+	protocolErrorInvalidFormat = "invalid_payload_format"
+)
+
+func validWrappedRecipientAddress(recipientID string) bool {
+	parts := strings.SplitN(strings.TrimSpace(recipientID), ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	userID, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+	if err != nil || userID <= 0 {
+		return false
+	}
+	return normalizeDeviceID(parts[1]) != ""
+}
+
+func validateV3CipherPayload(payload CipherPayload) error {
+	if payload.Version < 3 {
+		return errLegacyPayloadVersion
+	}
+	if strings.TrimSpace(payload.EncryptionScheme) != "DOUBLE_RATCHET_V1" {
+		return fmt.Errorf("%w: unsupported encryption scheme", errInvalidPayloadFormat)
+	}
+	if len(payload.WrappedKeys) == 0 {
+		return fmt.Errorf("%w: wrapped keys are required", errInvalidPayloadFormat)
+	}
+	for recipientID := range payload.WrappedKeys {
+		if !validWrappedRecipientAddress(recipientID) {
+			return fmt.Errorf("%w: invalid recipient address %q", errInvalidPayloadFormat, recipientID)
+		}
+	}
+	return nil
+}
+
+func protocolErrorFromValidation(err error) (code string, message string) {
+	if errors.Is(err, errLegacyPayloadVersion) {
+		return protocolErrorLegacyPayload, "检测到旧版密文协议，当前仅支持 V3。请刷新页面升级客户端后重试。"
+	}
+	return protocolErrorInvalidFormat, "密文格式非法或不完整，请刷新页面后重试。"
+}
+
+func (c *Client) sendProtocolError(code string, message string) {
+	frame := ProtocolErrorFrame{
+		Type:    "protocol_error",
+		RoomID:  c.roomID,
+		Code:    code,
+		Message: message,
+	}
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		return
+	}
+	select {
+	case c.send <- payload:
+	default:
+		logger.Warn(
+			"websocket_protocol_error_drop",
+			"user_id",
+			c.userID,
+			"room_id",
+			c.roomID,
+			"reason",
+			"send queue full",
+		)
+	}
+}
+
+func (c *Client) rejectInvalidPayload(frameType string, validationErr error) {
+	code, message := protocolErrorFromValidation(validationErr)
+	logger.Warn(
+		"drop_legacy_or_invalid_payload",
+		"user_id",
+		c.userID,
+		"room_id",
+		c.roomID,
+		"frame_type",
+		frameType,
+		"code",
+		code,
+		"error",
+		validationErr,
+	)
+	c.sendProtocolError(code, message)
+}
 
 func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -240,8 +332,9 @@ func (c *Client) readPump() {
 				SenderDeviceID:      senderDeviceID,
 				EncryptionScheme:    incoming.EncryptionScheme,
 			}
-			if payload.Version <= 0 {
-				payload.Version = 3
+			if err := validateV3CipherPayload(payload); err != nil {
+				c.rejectInvalidPayload("ciphertext", err)
+				continue
 			}
 			if err := verifyCipherSignature(payload); err != nil {
 				logger.Warn(
@@ -471,8 +564,10 @@ func (c *Client) readPump() {
 				SenderDeviceID:      senderDeviceID,
 				EncryptionScheme:    incoming.EncryptionScheme,
 			}
-			if payload.Version <= 0 {
-				payload.Version = 3
+			if err := validateV3CipherPayload(payload); err != nil {
+				cancel()
+				c.rejectInvalidPayload("message_update", err)
+				continue
 			}
 			if err := verifyCipherSignature(payload); err != nil {
 				cancel()
@@ -660,8 +755,9 @@ func (c *Client) readPump() {
 				SenderDeviceID:      senderDeviceID,
 				EncryptionScheme:    incoming.EncryptionScheme,
 			}
-			if payload.Version <= 0 {
-				payload.Version = 3
+			if err := validateV3CipherPayload(payload); err != nil {
+				c.rejectInvalidPayload("decrypt_recovery_payload", err)
+				continue
 			}
 			if err := verifyCipherSignature(payload); err != nil {
 				logger.Warn(

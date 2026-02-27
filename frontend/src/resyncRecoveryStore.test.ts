@@ -23,7 +23,7 @@ describe('resyncRecoveryStore', () => {
     rememberResyncRequest(100, 7, 200, 300);
     expect(shouldCooldownResyncRequest(100, 7, 200, 300)).toBe(true);
 
-    nowSpy.mockReturnValue(2_000_000_000_000 + 13 * 60 * 60 * 1000);
+    nowSpy.mockReturnValue(2_000_000_000_000 + 3 * 60 * 1000);
     expect(shouldCooldownResyncRequest(100, 7, 200, 300)).toBe(false);
   });
 

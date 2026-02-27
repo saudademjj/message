@@ -202,9 +202,12 @@ export function extractInviteTokenFromInput(input: string): string | null {
 }
 
 export function buildRecoveryRequestKey(
-  request: Pick<DecryptRecoveryRequestFrame, 'roomId' | 'fromUserId' | 'messageId'>,
+  request: Pick<DecryptRecoveryRequestFrame, 'roomId' | 'fromUserId' | 'messageId' | 'fromDeviceId'>,
 ): string {
-  return `${request.roomId}:${request.fromUserId}:${request.messageId}`;
+  const fromDeviceID = typeof request.fromDeviceId === 'string'
+    ? request.fromDeviceId.trim()
+    : '';
+  return `${request.roomId}:${request.fromUserId}:${request.messageId}:${fromDeviceID || '*'}`;
 }
 
 export function clearInviteTokenFromLocation(): void {

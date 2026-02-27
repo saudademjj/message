@@ -45,6 +45,7 @@ import type {
   DecryptRecoveryRequestFrame,
   MessageUpdateFrame,
   Peer,
+  ProtocolErrorFrame,
   ReadReceiptFrame,
   RatchetHandshakeFrame,
   Room,
@@ -57,6 +58,9 @@ const TYPING_IDLE_MS = 1800;
 const READ_RECEIPT_THROTTLE_MS = 1200;
 const SIGNAL_BUNDLE_RETRY_BASE_MS = 2000;
 const SIGNAL_BUNDLE_RETRY_MAX_MS = 30000;
+const RESYNC_SWEEP_INTERVAL_MS = 5000;
+const RESYNC_SWEEP_BATCH_SIZE = 50;
+const RESYNC_REQUEST_TIMEOUT_MS = 20000;
 
 type UseMessagesArgs = {
   api: ApiClient;
@@ -189,6 +193,8 @@ export function useMessages({
   const ackedMessageIDsRef = useRef<Set<number>>(new Set());
   const pendingAckMessageIDsRef = useRef<Set<number>>(new Set());
   const pendingResyncRecoveryRef = useRef<Map<string, DecryptRecoveryRequestFrame>>(new Map());
+  const pendingResyncTimeoutRef = useRef<Map<string, number>>(new Map());
+  const resyncSweepCursorRef = useRef(0);
   const historyBeforeIDRef = useRef<number | null>(null);
   const sentTypingRef = useRef(false);
   const remoteTypingTimersRef = useRef<Map<number, number>>(new Map());
@@ -213,6 +219,13 @@ export function useMessages({
       window.clearTimeout(timerID);
     }
     remoteTypingTimersRef.current.clear();
+  }, []);
+
+  useEffect(() => () => {
+    for (const timerID of pendingResyncTimeoutRef.current.values()) {
+      window.clearTimeout(timerID);
+    }
+    pendingResyncTimeoutRef.current.clear();
   }, []);
 
   useEffect(() => {
@@ -394,41 +407,85 @@ export function useMessages({
     }
   }, [auth, selectedRoomID, roomMembers, registerReadReceiptUpTo]);
 
-  const requestDecryptRecoveryIfNeeded = useCallback((message: Pick<ChatMessage, 'id' | 'senderId' | 'payload'>) => {
+  const hasOnlineSenderPeer = useCallback((senderUserID: number, senderDeviceID: string): boolean => {
+    if (!Number.isFinite(senderUserID) || senderUserID <= 0) {
+      return false;
+    }
+    const deviceID = senderDeviceID.trim();
+    return Object.values(peers).some((peer) => {
+      if (peer.userId !== senderUserID) {
+        return false;
+      }
+      if (!deviceID) {
+        return true;
+      }
+      return peer.deviceId === deviceID;
+    });
+  }, [peers]);
+
+  const clearPendingRecoveryRequest = useCallback((
+    messageID: number,
+    senderUserID: number,
+  ) => {
+    if (!auth || !selectedRoomID || messageID <= 0 || senderUserID <= 0) {
+      return;
+    }
+    const keyPrefix = `${selectedRoomID}:${auth.user.id}:${messageID}:`;
+    for (const key of [...pendingResyncRecoveryRef.current.keys()]) {
+      if (!key.startsWith(keyPrefix)) {
+        continue;
+      }
+      pendingResyncRecoveryRef.current.delete(key);
+      const timerID = pendingResyncTimeoutRef.current.get(key);
+      if (typeof timerID === 'number') {
+        window.clearTimeout(timerID);
+      }
+      pendingResyncTimeoutRef.current.delete(key);
+    }
+    clearResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID);
+  }, [auth, selectedRoomID]);
+
+  const queueDecryptRecoveryRequest = useCallback((
+    messageID: number,
+    senderUserID: number,
+    senderDeviceID: string,
+  ): 'sent' | 'invalid' | 'pending' | 'cooldown' | 'offline' | 'disconnected' => {
     if (!auth || !selectedRoomID) {
-      return;
+      return 'invalid';
     }
-    const messageID = Number(message.id);
-    const senderUserID = Number(message.senderId);
     if (
-      !Number.isFinite(messageID) ||
-      messageID <= 0 ||
-      !Number.isFinite(senderUserID) ||
-      senderUserID <= 0 ||
-      senderUserID === auth.user.id
+      !Number.isFinite(messageID)
+      || messageID <= 0
+      || !Number.isFinite(senderUserID)
+      || senderUserID <= 0
+      || senderUserID === auth.user.id
     ) {
-      return;
+      return 'invalid';
     }
+
+    const normalizedSenderDeviceID = senderDeviceID.trim();
+    if (!hasOnlineSenderPeer(senderUserID, normalizedSenderDeviceID)) {
+      return 'offline';
+    }
+
     const requestKey = buildRecoveryRequestKey({
       roomId: selectedRoomID,
       fromUserId: auth.user.id,
       messageId: messageID,
+      fromDeviceId: normalizedSenderDeviceID || undefined,
     });
-    if (
-      pendingResyncRecoveryRef.current.has(requestKey)
-      || shouldCooldownResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID)
-    ) {
-      return;
+    if (pendingResyncRecoveryRef.current.has(requestKey)) {
+      return 'pending';
+    }
+    if (shouldCooldownResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID)) {
+      return 'cooldown';
     }
 
-    const targetDeviceID = typeof message.payload?.senderDeviceId === 'string'
-      ? message.payload.senderDeviceId.trim()
-      : '';
     const request: DecryptRecoveryRequestFrame = {
       type: 'decrypt_recovery_request',
       roomId: selectedRoomID,
       toUserId: senderUserID,
-      toDeviceId: targetDeviceID || undefined,
+      toDeviceId: normalizedSenderDeviceID || undefined,
       fromUserId: auth.user.id,
       fromUsername: auth.user.username,
       messageId: messageID,
@@ -438,28 +495,36 @@ export function useMessages({
     const sent = sendJSON({
       type: 'decrypt_recovery_request',
       messageId: messageID,
-      toDeviceId: targetDeviceID || undefined,
+      toDeviceId: normalizedSenderDeviceID || undefined,
       action: 'resync',
     });
     if (!sent) {
       pendingResyncRecoveryRef.current.delete(requestKey);
-      return;
+      return 'disconnected';
     }
-    rememberResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID);
-  }, [auth, selectedRoomID, sendJSON]);
 
-  const clearPendingRecoveryRequest = useCallback((messageID: number, senderUserID: number) => {
-    if (!auth || !selectedRoomID || messageID <= 0 || senderUserID <= 0) {
-      return;
+    rememberResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID);
+    const existingTimer = pendingResyncTimeoutRef.current.get(requestKey);
+    if (typeof existingTimer === 'number') {
+      window.clearTimeout(existingTimer);
     }
-    const requestKey = buildRecoveryRequestKey({
-      roomId: selectedRoomID,
-      fromUserId: auth.user.id,
-      messageId: messageID,
-    });
-    pendingResyncRecoveryRef.current.delete(requestKey);
-    clearResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID);
-  }, [auth, selectedRoomID]);
+    const timeoutID = window.setTimeout(() => {
+      pendingResyncRecoveryRef.current.delete(requestKey);
+      pendingResyncTimeoutRef.current.delete(requestKey);
+      clearResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID);
+    }, RESYNC_REQUEST_TIMEOUT_MS);
+    pendingResyncTimeoutRef.current.set(requestKey, timeoutID);
+    return 'sent';
+  }, [auth, selectedRoomID, sendJSON, hasOnlineSenderPeer]);
+
+  const requestDecryptRecoveryIfNeeded = useCallback((message: Pick<ChatMessage, 'id' | 'senderId' | 'payload'>) => {
+    const messageID = Number(message.id);
+    const senderUserID = Number(message.senderId);
+    const senderDeviceID = typeof message.payload?.senderDeviceId === 'string'
+      ? message.payload.senderDeviceId.trim()
+      : '';
+    void queueDecryptRecoveryRequest(messageID, senderUserID, senderDeviceID);
+  }, [queueDecryptRecoveryRequest]);
 
   const emitTypingStatus = useCallback((isTyping: boolean) => {
     if (!auth || !selectedRoomID || !wsConnected) {
@@ -822,13 +887,34 @@ export function useMessages({
         return false;
       }
 
-      const original = messagesRef.current.find(
+      let original: ChatMessage | UIMessage | undefined = messagesRef.current.find(
         (item) =>
           item.id === request.messageId &&
           item.senderId === auth.user.id,
       );
+      if (!original && selectedRoomID) {
+        try {
+          const response = await api.fetchMessages(selectedRoomID, {
+            limit: 1,
+            beforeMessageID: request.messageId + 1,
+          });
+          original = response.messages.find(
+            (item) =>
+              item.id === request.messageId &&
+              item.senderId === auth.user.id,
+          );
+        } catch {
+          // Ignore remote fetch failures and fallback to local caches.
+        }
+      }
       let recoveryPlaintext: string | undefined;
-      if (original?.decryptState === 'ok' && original.plaintext) {
+      if (
+        original
+        && 'decryptState' in original
+        && original.decryptState === 'ok'
+        && typeof original.plaintext === 'string'
+        && original.plaintext
+      ) {
         recoveryPlaintext = original.plaintext;
       }
 
@@ -924,7 +1010,7 @@ export function useMessages({
       setInfo(`已向 ${request.fromUsername} 回传消息 #${request.messageId}`);
       return true;
     },
-    [auth, identity, resolveSignalBundle, sendJSON, setInfo],
+    [api, auth, identity, resolveSignalBundle, selectedRoomID, sendJSON, setInfo],
   );
 
   useEffect(() => {
@@ -959,6 +1045,11 @@ export function useMessages({
     ackedMessageIDsRef.current.clear();
     pendingAckMessageIDsRef.current.clear();
     pendingResyncRecoveryRef.current.clear();
+    for (const timerID of pendingResyncTimeoutRef.current.values()) {
+      window.clearTimeout(timerID);
+    }
+    pendingResyncTimeoutRef.current.clear();
+    resyncSweepCursorRef.current = 0;
     for (const timerID of remoteTypingTimersRef.current.values()) {
       window.clearTimeout(timerID);
     }
@@ -1260,6 +1351,19 @@ export function useMessages({
         return;
       }
 
+      if (frame.type === 'protocol_error') {
+        const protocolError = frame as unknown as ProtocolErrorFrame;
+        if (protocolError.roomId !== selectedRoomID) {
+          return;
+        }
+        const fallback = '检测到协议不兼容，请刷新页面后重试。';
+        const detail = typeof protocolError.message === 'string' && protocolError.message.trim()
+          ? protocolError.message.trim()
+          : fallback;
+        setError(detail);
+        return;
+      }
+
       if (frame.type === 'message_update') {
         const update = frame as unknown as MessageUpdateFrame;
         if (update.roomId !== selectedRoomID || update.messageId <= 0) {
@@ -1308,6 +1412,7 @@ export function useMessages({
         if (recovery.messageId <= 0 || recovery.fromUserId <= 0 || !recovery.payload) {
           return;
         }
+        clearPendingRecoveryRequest(recovery.messageId, recovery.fromUserId);
         const existing = messagesRef.current.find((item) => item.id === recovery.messageId);
         if (!existing || existing.senderId !== recovery.fromUserId) {
           return;
@@ -1406,7 +1511,9 @@ export function useMessages({
     bumpHandshakeTick,
     setPeers,
     sendJSON,
+    setError,
     setInfo,
+    clearPendingRecoveryRequest,
   ]);
 
   useEffect(() => {
@@ -1461,19 +1568,25 @@ export function useMessages({
     void flushDecryptAckQueue();
   }, [wsConnected, handshakeTick, flushDecryptAckQueue]);
 
-  // Auto-retry decryption of failed messages when handshakeTick changes
-  // (new sessions established, meaning previously undecryptable messages may now work)
-  useEffect(() => {
-    if (!auth || !identity || !selectedRoomID || handshakeTick <= 0) {
+  const runResyncSweep = useCallback(() => {
+    if (!auth || !identity || !selectedRoomID) {
       return;
     }
     const failedMessages = messagesRef.current.filter(
-      (msg) => msg.decryptState === 'failed' && msg.roomId === selectedRoomID,
-    ).slice(-20);
+      (message) =>
+        message.roomId === selectedRoomID &&
+        message.decryptState === 'failed',
+    );
     if (failedMessages.length === 0) {
+      resyncSweepCursorRef.current = 0;
       return;
     }
-    for (const message of failedMessages) {
+
+    const batchSize = Math.min(RESYNC_SWEEP_BATCH_SIZE, failedMessages.length);
+    const startIndex = resyncSweepCursorRef.current % failedMessages.length;
+    for (let offset = 0; offset < batchSize; offset += 1) {
+      const index = (startIndex + offset) % failedMessages.length;
+      const message = failedMessages[index];
       const hasWrappedKey = message.payload?.wrappedKeys?.[
         buildRecipientAddress(auth.user.id, auth.device.deviceId)
       ];
@@ -1486,15 +1599,28 @@ export function useMessages({
         requestDecryptRecoveryIfNeeded(message);
       }
     }
+    resyncSweepCursorRef.current = (startIndex + batchSize) % failedMessages.length;
   }, [
     auth,
     identity,
     selectedRoomID,
-    handshakeTick,
-    decryptAndUpdate,
     enqueueDecryptTask,
+    decryptAndUpdate,
     requestDecryptRecoveryIfNeeded,
   ]);
+
+  useEffect(() => {
+    if (!auth || !identity || !selectedRoomID) {
+      return;
+    }
+    runResyncSweep();
+    const timerID = window.setInterval(() => {
+      runResyncSweep();
+    }, RESYNC_SWEEP_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timerID);
+    };
+  }, [auth, identity, selectedRoomID, handshakeTick, runResyncSweep]);
 
   useLayoutEffect(() => {
     const list = messageListRef.current;
@@ -1836,27 +1962,29 @@ export function useMessages({
     if (senderUserID === auth.user.id) {
       return;
     }
-    if (shouldCooldownResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID)) {
-      setInfo(`消息 #${messageID} 已在冷却期内请求过重同步`);
-      return;
-    }
     const targetMessage = messagesRef.current.find((item) => item.id === messageID);
     const targetDeviceID = typeof targetMessage?.payload?.senderDeviceId === 'string'
       ? targetMessage.payload.senderDeviceId.trim()
       : '';
-    const sent = sendJSON({
-      type: 'decrypt_recovery_request',
-      messageId: messageID,
-      toDeviceId: targetDeviceID || undefined,
-      action: 'resync',
-    });
-    if (!sent) {
-      setError('当前处于离线状态，无法发送恢复请求');
+    const status = queueDecryptRecoveryRequest(messageID, senderUserID, targetDeviceID);
+    if (status === 'sent') {
+      setInfo(`已请求发送方重同步密钥（消息 #${messageID}）`);
       return;
     }
-    rememberResyncRequest(auth.user.id, selectedRoomID, senderUserID, messageID);
-    setInfo(`已请求发送方重同步密钥（消息 #${messageID}）`);
-  }, [auth, selectedRoomID, sendJSON, setError, setInfo]);
+    if (status === 'cooldown') {
+      setInfo(`消息 #${messageID} 已在冷却期内请求过重同步`);
+      return;
+    }
+    if (status === 'pending') {
+      setInfo(`消息 #${messageID} 的重同步请求正在处理中`);
+      return;
+    }
+    if (status === 'offline') {
+      setInfo(`发送方当前不在线，消息 #${messageID} 将在其上线后自动重试`);
+      return;
+    }
+    setError('当前处于离线状态，无法发送恢复请求');
+  }, [auth, selectedRoomID, queueDecryptRecoveryRequest, setError, setInfo]);
 
   const resetReplyAndFocusState = useCallback(() => {
     setFocusMessageID(null);
