@@ -381,43 +381,6 @@ func (c *Client) readPump() {
 				c.app.hub.Broadcast(c.roomID, out)
 			}
 
-		case "dr_handshake":
-			if incoming.ToUserID <= 0 {
-				continue
-			}
-			step := strings.ToLower(strings.TrimSpace(incoming.Step))
-			if step != "init" && step != "ack" {
-				continue
-			}
-			if len(incoming.RatchetDHPublic) == 0 || !json.Valid(incoming.RatchetDHPublic) {
-				continue
-			}
-			if len(incoming.IdentityPublicJWK) == 0 || !json.Valid(incoming.IdentityPublicJWK) {
-				continue
-			}
-			if len(incoming.IdentitySigningPubJWK) == 0 || !json.Valid(incoming.IdentitySigningPubJWK) {
-				continue
-			}
-			announcedSigning := c.getSigningPublicKey()
-			if len(announcedSigning) == 0 || !jsonEqualCanonical(announcedSigning, incoming.IdentitySigningPubJWK) {
-				continue
-			}
-			payload, err := json.Marshal(map[string]any{
-				"type":                        "dr_handshake",
-				"roomId":                      c.roomID,
-				"fromUserId":                  c.userID,
-				"fromUsername":                c.username,
-				"toUserId":                    incoming.ToUserID,
-				"step":                        step,
-				"sessionVersion":              incoming.SessionVersion,
-				"ratchetDhPublicKeyJwk":       json.RawMessage(incoming.RatchetDHPublic),
-				"identityPublicKeyJwk":        json.RawMessage(incoming.IdentityPublicJWK),
-				"identitySigningPublicKeyJwk": json.RawMessage(incoming.IdentitySigningPubJWK),
-			})
-			if err == nil {
-				c.app.hub.Broadcast(c.roomID, payload)
-			}
-
 		case "typing_status":
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := c.app.ensureMembership(ctx, c.userID, c.roomID); err != nil {

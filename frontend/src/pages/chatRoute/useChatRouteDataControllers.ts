@@ -24,6 +24,7 @@ type UseChatRouteDataControllersArgs = {
   closeSidebar: () => void;
   onAuthReset: () => void;
   identity: Identity | null;
+  identityBound: boolean;
   handshakeTick: number;
   bumpHandshakeTick: () => void;
   wsConnected: boolean;
@@ -54,6 +55,7 @@ export function useChatRouteDataControllers({
   closeSidebar,
   onAuthReset,
   identity,
+  identityBound,
   handshakeTick,
   bumpHandshakeTick,
   wsConnected,
@@ -90,7 +92,9 @@ export function useChatRouteDataControllers({
 
   const sendQueueController = useSendQueue({
     authUserID: auth?.user.id ?? null,
+    authDeviceID: auth?.device.deviceId ?? null,
     identity,
+    identityBound,
     selectedRoomID: roomsController.selectedRoomID,
     wsConnected,
     setRoomMembers: roomsController.setRoomMembers,

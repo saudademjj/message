@@ -33,7 +33,7 @@ function App() {
   return (
     <AuthProvider api={api}>
       <CryptoProvider>
-        <WebSocketProvider apiBase={API_BASE}>
+        <WebSocketProvider api={api} apiBase={API_BASE}>
           <Routes>
             <Route path="/login" element={<LoginRouteView />} />
             <Route path="/chat" element={<ChatRouteView />} />

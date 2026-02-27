@@ -120,19 +120,6 @@ export interface SafetyNumberSnapshot {
   targetHistory: SafetyNumberHistoryEntry[];
 }
 
-export interface RatchetHandshakeFrame {
-  type: 'dr_handshake';
-  roomId: number;
-  fromUserId: number;
-  fromUsername: string;
-  toUserId: number;
-  step: 'init' | 'ack';
-  sessionVersion?: number;
-  ratchetDhPublicKeyJwk: JsonWebKey;
-  identityPublicKeyJwk: JsonWebKey;
-  identitySigningPublicKeyJwk: JsonWebKey;
-}
-
 export interface DecryptAckFrame {
   type: 'decrypt_ack';
   roomId: number;

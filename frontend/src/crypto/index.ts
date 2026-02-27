@@ -1,7 +1,6 @@
 export type {
   Identity,
   RotationResult,
-  RatchetHandshakeOutgoing,
   RatchetSessionStatus,
   SignalPreKeyBundle,
   SignalPreKeyBundleList,
@@ -18,7 +17,6 @@ export {
 
 export {
   ensureRatchetSessionsForRecipients,
-  handleRatchetHandshakeFrame,
   resetRatchetSession,
 } from './ratchet';
 

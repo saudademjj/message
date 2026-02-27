@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
-import type { ApiClient } from '../api';
+import { ApiError, type ApiClient } from '../api';
 import { INVITE_QUERY_KEY, clearInviteTokenFromLocation, extractInviteTokenFromInput, parseInviteTokenFromLocation } from '../app/helpers';
 import { useChatStore } from '../stores/chatStore';
 import type { Room } from '../types';
@@ -95,6 +95,21 @@ export function useRooms({
       room.name.toLowerCase().includes(query) || String(room.id).includes(query),
     );
   }, [roomListQuery, rooms]);
+
+  const mapRoomActionError = useCallback((reason: unknown, fallback: string): string => {
+    if (reason instanceof ApiError && reason.code === 'http') {
+      if (reason.serverCode === 'room_name_conflict') {
+        return '房间名已存在，请更换后再创建';
+      }
+      if (reason.serverCode === 'invite_required') {
+        return '普通用户需要邀请链接才能加入房间';
+      }
+      if (reason.serverCode === 'system_room_admin_only') {
+        return '系统房间仅管理员可邀请或加入';
+      }
+    }
+    return fallback;
+  }, []);
 
   const refreshRooms = useCallback(
     async (signal?: AbortSignal) => {
@@ -264,13 +279,13 @@ export function useRooms({
       setNewRoomName('');
       closeSidebar();
       setRoomModalOpen(false);
-      setInfo(`已加入房间: ${room.name}`);
+      setInfo(`已创建并加入房间: ${room.name}`);
     } catch (reason: unknown) {
-      reportError(reason, '创建房间失败');
+      reportError(reason, mapRoomActionError(reason, '创建房间失败'));
     } finally {
       setBusy(false);
     }
-  }, [api, auth, closeSidebar, newRoomName, refreshRooms, reportError, setBusy, setError, setInfo, setSelectedRoomID]);
+  }, [api, auth, closeSidebar, mapRoomActionError, newRoomName, refreshRooms, reportError, setBusy, setError, setInfo, setSelectedRoomID]);
 
   const handleJoinRoom = useCallback(async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -280,13 +295,18 @@ export function useRooms({
 
     const input = joinRoomID.trim();
     if (!input) {
-      setError('请输入房间 ID 或邀请链接');
+      setError('请输入邀请链接或邀请令牌');
       return;
     }
 
     const inviteToken = extractInviteTokenFromInput(input);
+    const allowDirectJoin = auth.user.role === 'admin';
     let roomID: number | null = null;
     if (!inviteToken) {
+      if (!allowDirectJoin) {
+        setError('普通用户仅支持邀请加入，请粘贴邀请链接或邀请令牌');
+        return;
+      }
       if (!/^\d+$/.test(input)) {
         setError('请输入有效房间 ID 或邀请链接');
         return;
@@ -313,7 +333,7 @@ export function useRooms({
       }
 
       if (!roomID) {
-        setError('请输入有效房间 ID 或邀请链接');
+        setError('请输入有效房间 ID');
         return;
       }
 
@@ -325,11 +345,11 @@ export function useRooms({
       setRoomModalOpen(false);
       setInfo(`已加入房间 #${roomID}`);
     } catch (reason: unknown) {
-      reportError(reason, '加入房间失败');
+      reportError(reason, mapRoomActionError(reason, '加入房间失败'));
     } finally {
       setBusy(false);
     }
-  }, [api, auth, closeSidebar, joinRoomID, refreshRooms, reportError, setBusy, setError, setInfo, setSelectedRoomID]);
+  }, [api, auth, closeSidebar, joinRoomID, mapRoomActionError, refreshRooms, reportError, setBusy, setError, setInfo, setSelectedRoomID]);
 
   const handleCopyInviteLink = useCallback(async () => {
     if (!auth || !selectedRoomID) {

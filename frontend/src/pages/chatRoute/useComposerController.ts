@@ -23,6 +23,7 @@ type UseComposerControllerArgs = {
   flushSendQueue: () => Promise<void>;
   wsConnected: boolean;
   identity: Identity | null;
+  identityBound: boolean;
   setInfo: Dispatch<SetStateAction<string>>;
   setError: Dispatch<SetStateAction<string>>;
   isMobileInputMode: boolean;
@@ -44,6 +45,7 @@ export function useComposerController({
   flushSendQueue,
   wsConnected,
   identity,
+  identityBound,
   setInfo,
   setError,
   isMobileInputMode,
@@ -64,6 +66,10 @@ export function useComposerController({
     if (!text) {
       return;
     }
+    if (!identity || !identityBound) {
+      setError('本地安全身份未就绪或与当前会话不一致，已阻止发送');
+      return;
+    }
 
     const composed = replyTarget
       ? `> @${replyTarget.senderUsername}: ${replyTarget.snippet}\n${text}`
@@ -78,12 +84,8 @@ export function useComposerController({
     }
     emitTypingStatus(false);
 
-    if (!wsConnected || !identity) {
-      if (!identity) {
-        setInfo('消息已暂存，加密就绪后自动发送');
-      } else {
-        setInfo('消息已暂存，连接恢复后自动发送');
-      }
+    if (!wsConnected) {
+      setInfo('消息已暂存，连接恢复后自动发送');
       return;
     }
 
@@ -98,6 +100,7 @@ export function useComposerController({
     emitTypingStatus,
     flushSendQueue,
     identity,
+    identityBound,
     queueText,
     replyTarget,
     selectedRoomID,

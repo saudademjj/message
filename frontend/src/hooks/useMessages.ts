@@ -12,11 +12,9 @@ import {
   decryptPayload,
   ensureRatchetSessionsForRecipients,
   encryptForRecipients,
-  handleRatchetHandshakeFrame,
   resetRatchetSession,
   signDecryptAck,
   type Identity,
-  type RatchetHandshakeOutgoing,
 } from '../crypto';
 import { buildRecipientAddress } from '../crypto/utils';
 import type { ApiClient } from '../api';
@@ -47,7 +45,6 @@ import type {
   Peer,
   ProtocolErrorFrame,
   ReadReceiptFrame,
-  RatchetHandshakeFrame,
   Room,
   TypingStatusFrame,
   User,
@@ -205,6 +202,14 @@ export function useMessages({
   const lastPublishedSignalBundleRef = useRef('');
   const activeRoomIDRef = useRef<number | null>(selectedRoomID);
   const decryptQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const identityMismatchNotifiedRef = useRef(false);
+
+  const identityBound = Boolean(
+    auth
+    && identity
+    && identity.userID === auth.user.id
+    && identity.activeKeyID === auth.device.deviceId,
+  );
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -229,10 +234,20 @@ export function useMessages({
   }, []);
 
   useEffect(() => {
-    if (!auth || !identity) {
+    if (!auth || !identity || !identityBound) {
       lastPublishedSignalBundleRef.current = '';
+      identityMismatchNotifiedRef.current = false;
       return;
     }
+    if (!identityBound) {
+      lastPublishedSignalBundleRef.current = '';
+      if (!identityMismatchNotifiedRef.current) {
+        setError('本地安全身份与当前会话不一致，请刷新页面或重新登录');
+        identityMismatchNotifiedRef.current = true;
+      }
+      return;
+    }
+    identityMismatchNotifiedRef.current = false;
     const bundle = {
       identityKeyJwk: identity.publicKeyJwk,
       identitySigningPublicKeyJwk: identity.signingPublicKeyJwk,
@@ -316,10 +331,10 @@ export function useMessages({
         window.clearTimeout(retryTimer);
       }
     };
-  }, [api, auth, identity, reportError]);
+  }, [api, auth, identity, identityBound, reportError, setError]);
 
   useEffect(() => {
-    if (!auth || !identity) {
+    if (!auth || !identity || !identityBound) {
       setPeerSafetyNumbers({});
       return;
     }
@@ -356,7 +371,7 @@ export function useMessages({
     return () => {
       cancelled = true;
     };
-  }, [api, auth, identity, peers]);
+  }, [api, auth, identity, identityBound, peers]);
 
   const registerDeliveryAck = useCallback((messageID: number, fromUserID: number) => {
     if (!Number.isFinite(messageID) || messageID <= 0 || !Number.isFinite(fromUserID) || fromUserID <= 0) {
@@ -627,7 +642,7 @@ export function useMessages({
   }, []);
 
   const flushDecryptAckQueue = useCallback(async () => {
-    if (!auth || !identity || !selectedRoomID) {
+    if (!auth || !identity || !identityBound || !selectedRoomID) {
       return;
     }
     if (!wsConnected) {
@@ -663,7 +678,7 @@ export function useMessages({
         break;
       }
     }
-  }, [auth, identity, selectedRoomID, wsConnected, sendJSON, reportError]);
+  }, [auth, identity, identityBound, selectedRoomID, wsConnected, sendJSON, reportError]);
 
   const queueDecryptAck = useCallback((message: ChatMessage) => {
     if (!auth || message.senderId === auth.user.id || message.id <= 0) {
@@ -695,7 +710,7 @@ export function useMessages({
           pendingWidthPx,
         };
       }
-      if (!auth || !identity) {
+      if (!auth || !identity || !identityBound) {
         return {
           ...message,
           plaintext: '本地安全身份正在初始化，请稍后再试。',
@@ -770,7 +785,7 @@ export function useMessages({
         };
       }
     },
-    [auth, identity],
+    [auth, identity, identityBound],
   );
 
   const decryptMessagesSequentially = useCallback(
@@ -880,7 +895,7 @@ export function useMessages({
 
   const sendDecryptRecoveryPayload = useCallback(
     async (request: DecryptRecoveryRequestFrame): Promise<boolean> => {
-      if (!auth || !identity) {
+      if (!auth || !identity || !identityBound) {
         return false;
       }
       if (request.fromUserId <= 0 || request.messageId <= 0 || request.fromUserId === auth.user.id) {
@@ -1010,7 +1025,7 @@ export function useMessages({
       setInfo(`已向 ${request.fromUsername} 回传消息 #${request.messageId}`);
       return true;
     },
-    [api, auth, identity, resolveSignalBundle, selectedRoomID, sendJSON, setInfo],
+    [api, auth, identity, identityBound, resolveSignalBundle, selectedRoomID, sendJSON, setInfo],
   );
 
   useEffect(() => {
@@ -1057,7 +1072,7 @@ export function useMessages({
   }, [onRoomSwitch, selectedRoomID, setMessageReadReceipts, setMessages]);
 
   useEffect(() => {
-    if (!auth || !identity || !selectedRoomID) {
+    if (!auth || !identity || !identityBound || !selectedRoomID) {
       setMessages([]);
       setIsRoomSwitching(false);
       return;
@@ -1122,10 +1137,10 @@ export function useMessages({
       cancelled = true;
       controller.abort();
     };
-  }, [api, auth, identity, selectedRoomID, decryptMessagesSequentially, queueDecryptAck, reportError, setMessages]);
+  }, [api, auth, identity, identityBound, selectedRoomID, decryptMessagesSequentially, queueDecryptAck, reportError, setMessages]);
 
   useEffect(() => {
-    if (!auth || !identity || !selectedRoomID) {
+    if (!auth || !identity || !identityBound || !selectedRoomID) {
       disconnect('switch room');
       setPeers({});
       return;
@@ -1136,10 +1151,10 @@ export function useMessages({
     return () => {
       disconnect('switch room');
     };
-  }, [auth, identity, selectedRoomID, connect, disconnect, setPeers]);
+  }, [auth, identity, identityBound, selectedRoomID, connect, disconnect, setPeers]);
 
   useEffect(() => {
-    if (!wsConnected || !auth || !identity || !selectedRoomID) {
+    if (!wsConnected || !auth || !identity || !identityBound || !selectedRoomID) {
       return;
     }
     setError('');
@@ -1154,6 +1169,7 @@ export function useMessages({
     wsConnected,
     auth,
     identity,
+    identityBound,
     selectedRoomID,
     sendJSON,
     bumpHandshakeTick,
@@ -1162,12 +1178,9 @@ export function useMessages({
   ]);
 
   useEffect(() => {
-    if (!auth || !identity || !selectedRoomID) {
+    if (!auth || !identity || !identityBound || !selectedRoomID) {
       return;
     }
-    const emitRatchetHandshake = (frame: RatchetHandshakeOutgoing) => {
-      sendJSON(frame);
-    };
 
     const unsubscribe = subscribeMessage((frame) => {
       if (frame.type === 'room_peers') {
@@ -1236,47 +1249,6 @@ export function useMessages({
             }
           }
           return next;
-        });
-        return;
-      }
-
-      if (frame.type === 'dr_handshake') {
-        const handshake = frame as unknown as RatchetHandshakeFrame;
-        if (handshake.toUserId !== auth.user.id) {
-          return;
-        }
-        if (!handshake.fromUserId || handshake.fromUserId === auth.user.id) {
-          return;
-        }
-        void handleRatchetHandshakeFrame(
-          auth.user.id,
-          identity,
-          handshake,
-          emitRatchetHandshake,
-        ).then((applied) => {
-          if (applied) {
-            setInfo(`双棘轮会话就绪: ${handshake.fromUsername}`);
-            bumpHandshakeTick();
-
-            const pendingRequests = [...pendingResyncRecoveryRef.current.values()].filter(
-              (request) =>
-                request.roomId === selectedRoomID &&
-                request.fromUserId === handshake.fromUserId,
-            );
-            for (const request of pendingRequests) {
-              void sendDecryptRecoveryPayload(request)
-                .then((sent) => {
-                  if (sent) {
-                    pendingResyncRecoveryRef.current.delete(buildRecoveryRequestKey(request));
-                  }
-                })
-                .catch((reason: unknown) => {
-                  reportError(reason, '自动回传重同步消息失败');
-                });
-            }
-          }
-        }).catch((reason: unknown) => {
-          reportError(reason, '双棘轮握手失败');
         });
         return;
       }
@@ -1356,10 +1328,17 @@ export function useMessages({
         if (protocolError.roomId !== selectedRoomID) {
           return;
         }
-        const fallback = '检测到协议不兼容，请刷新页面后重试。';
+        if (protocolError.code === 'legacy_payload_not_supported') {
+          setError('检测到旧协议密文，已停止自动恢复。请刷新页面并让发送方重新发送该消息。');
+          return;
+        }
+        if (protocolError.code === 'invalid_payload_format') {
+          setError('消息密文格式异常。可先请求重同步；若仍失败，请重新登录后重试。');
+          return;
+        }
         const detail = typeof protocolError.message === 'string' && protocolError.message.trim()
           ? protocolError.message.trim()
-          : fallback;
+          : '检测到协议不兼容，请刷新页面后重试。';
         setError(detail);
         return;
       }
@@ -1498,6 +1477,7 @@ export function useMessages({
   }, [
     auth,
     identity,
+    identityBound,
     selectedRoomID,
     subscribeMessage,
     decryptAndUpdate,
@@ -1517,7 +1497,7 @@ export function useMessages({
   ]);
 
   useEffect(() => {
-    if (!auth || !identity || !selectedRoomID) {
+    if (!auth || !identity || !identityBound || !selectedRoomID) {
       return;
     }
     const unsubscribeOpen = subscribeOpen(() => {
@@ -1559,7 +1539,7 @@ export function useMessages({
         });
     });
     return unsubscribeOpen;
-  }, [auth, identity, selectedRoomID, subscribeOpen, api, decryptMessagesSequentially, setMessages, queueDecryptAck, reportError]);
+  }, [auth, identity, identityBound, selectedRoomID, subscribeOpen, api, decryptMessagesSequentially, setMessages, queueDecryptAck, reportError]);
 
   useEffect(() => {
     if (!wsConnected) {
@@ -1569,7 +1549,7 @@ export function useMessages({
   }, [wsConnected, handshakeTick, flushDecryptAckQueue]);
 
   const runResyncSweep = useCallback(() => {
-    if (!auth || !identity || !selectedRoomID) {
+    if (!auth || !identity || !identityBound || !selectedRoomID) {
       return;
     }
     const failedMessages = messagesRef.current.filter(
@@ -1603,6 +1583,7 @@ export function useMessages({
   }, [
     auth,
     identity,
+    identityBound,
     selectedRoomID,
     enqueueDecryptTask,
     decryptAndUpdate,
@@ -1610,7 +1591,7 @@ export function useMessages({
   ]);
 
   useEffect(() => {
-    if (!auth || !identity || !selectedRoomID) {
+    if (!auth || !identity || !identityBound || !selectedRoomID) {
       return;
     }
     runResyncSweep();
@@ -1620,7 +1601,7 @@ export function useMessages({
     return () => {
       window.clearInterval(timerID);
     };
-  }, [auth, identity, selectedRoomID, handshakeTick, runResyncSweep]);
+  }, [auth, identity, identityBound, selectedRoomID, handshakeTick, runResyncSweep]);
 
   useLayoutEffect(() => {
     const list = messageListRef.current;
@@ -1673,7 +1654,7 @@ export function useMessages({
   }, [auth]);
 
   const handleLoadMoreHistory = useCallback(() => {
-    if (!auth || !identity || !selectedRoomID || !hasMoreHistory || historyLoading || loadingMoreRef.current) {
+    if (!auth || !identity || !identityBound || !selectedRoomID || !hasMoreHistory || historyLoading || loadingMoreRef.current) {
       return;
     }
     const beforeMessageID = historyBeforeIDRef.current ?? messagesRef.current[0]?.id ?? null;
@@ -1728,7 +1709,7 @@ export function useMessages({
       loadingMoreRef.current = false;
       setHistoryLoading(false);
     });
-  }, [api, auth, identity, selectedRoomID, hasMoreHistory, historyLoading, decryptMessagesSequentially, reportError, setMessages]);
+  }, [api, auth, identity, identityBound, selectedRoomID, hasMoreHistory, historyLoading, decryptMessagesSequentially, reportError, setMessages]);
 
   const handleMessageListScroll = useCallback(() => {
     const list = messageListRef.current;
@@ -1866,7 +1847,7 @@ export function useMessages({
   }, [roomSearchMatches.length]);
 
   const handleEditMessage = useCallback(async (message: UIMessage) => {
-    if (!auth || !identity || !selectedRoomID || message.senderId !== auth.user.id || message.revokedAt) {
+    if (!auth || !identity || !identityBound || !selectedRoomID || message.senderId !== auth.user.id || message.revokedAt) {
       return;
     }
     const edited = window.prompt('编辑消息', message.plaintext);
@@ -1930,7 +1911,7 @@ export function useMessages({
     } catch (reason: unknown) {
       reportError(reason, '编辑消息失败');
     }
-  }, [auth, identity, selectedRoomID, roomMembers, resolveSignalBundle, sendJSON, reportError, setError, setInfo]);
+  }, [auth, identity, identityBound, selectedRoomID, roomMembers, resolveSignalBundle, sendJSON, reportError, setError, setInfo]);
 
   const handleRevokeMessage = useCallback((messageID: number) => {
     if (!auth || !selectedRoomID || messageID <= 0) {

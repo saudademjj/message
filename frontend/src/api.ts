@@ -122,12 +122,14 @@ export type ApiRequestOptions = {
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
   readonly status: number | null;
+  readonly serverCode: string | null;
 
-  constructor(code: ApiErrorCode, message: string, status: number | null = null) {
+  constructor(code: ApiErrorCode, message: string, status: number | null = null, serverCode: string | null = null) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
+    this.serverCode = serverCode;
   }
 }
 
@@ -185,7 +187,10 @@ async function parseJSON<T>(response: Response): Promise<T> {
         : typeof body?.message === 'string'
           ? body.message
           : `request failed: ${response.status}`;
-    throw new ApiError('http', message, response.status);
+    const serverCode = typeof body?.code === 'string' && body.code.trim()
+      ? body.code.trim()
+      : null;
+    throw new ApiError('http', message, response.status, serverCode);
   }
   return body as T;
 }

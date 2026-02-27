@@ -18,6 +18,8 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
   const { auth, logout } = useAuth();
   const {
     identity,
+    identityReady,
+    identityBound,
     handshakeTick,
     bumpHandshakeTick,
     cryptoError,
@@ -28,6 +30,7 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
   const {
     wsConnected,
     reconnectCountdownSec,
+    wsAuthProbeFailed,
     wsError,
     clearWsError,
     connect,
@@ -96,6 +99,7 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
     closeSidebar,
     onAuthReset,
     identity,
+    identityBound,
     handshakeTick,
     bumpHandshakeTick,
     wsConnected,
@@ -146,6 +150,7 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
     flushSendQueue: sendQueueController.flushSendQueue,
     wsConnected,
     identity,
+    identityBound,
     setInfo,
     setError,
     isMobileInputMode: state.isMobileInputMode,
@@ -223,6 +228,7 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
   const viewModel = useChatRouteViewModel({
     wsConnected,
     reconnectCountdownSec,
+    wsAuthProbeFailed,
     identity,
     failedQueueItems: sendQueueController.failedQueueItems,
     roomSearchQuery: messagesController.roomSearchQuery,
@@ -276,7 +282,7 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
         dismissToast: state.dismissToast,
       }}
       actions={actions}
-      identityReady={Boolean(identity)}
+      identityReady={identityReady}
       wsConnected={wsConnected}
     />
   );

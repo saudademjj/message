@@ -179,6 +179,7 @@ export function ChatRouteLayout({
         open={roomsController.roomModalOpen}
         mode={roomsController.roomModalMode}
         busy={busy}
+        allowDirectJoin={authUser.role === 'admin'}
         newRoomName={roomsController.newRoomName}
         joinRoomID={roomsController.joinRoomID}
         modalRef={ui.roomModalCardRef}

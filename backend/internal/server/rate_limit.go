@@ -121,7 +121,9 @@ func clientKeyFromRequest(r *http.Request, trustProxyHeaders bool) string {
 }
 
 func extractForwardedFor(raw string) string {
-	for _, candidate := range strings.Split(raw, ",") {
+	parts := strings.Split(raw, ",")
+	for index := len(parts) - 1; index >= 0; index -= 1 {
+		candidate := parts[index]
 		if ip := normalizeClientIPCandidate(candidate); ip != "" {
 			return ip
 		}
