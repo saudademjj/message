@@ -1,6 +1,6 @@
 # E2EE Chat
 
-<p align="right">中文 | <a href="https://github.com/saudademjj/message/tree/codex/readme-en">English</a></p>
+<p align="right">中文 | <a href="https://github.com/saudademjj/message/tree/en/readme">English</a></p>
 
 `E2EE Chat` 是一个前后端分离的端到端加密聊天室：
 
