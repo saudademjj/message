@@ -1,10 +1,8 @@
+<a id="readme-top"></a>
+
 # E2EE Chat
 
-**Language:** [Chinese](#chinese-version) | [English](#english-version)
-
-## Chinese Version
-
-**Language:** Chinese | [English](#english-version)
+<p align="right">中文 | <a href="#english-version">English</a></p>
 
 `E2EE Chat` 是一个前后端分离的端到端加密聊天室：
 
@@ -90,7 +88,7 @@ docker compose up -d --build
 
 ## English Version
 
-**Language:** [Chinese](#chinese-version) | English
+<p align="right"><a href="#readme-top">中文</a> | English</p>
 
 `E2EE Chat` is a full-stack end-to-end encrypted chat application built with a Go backend, a React frontend, and PostgreSQL as ciphertext storage. The project focuses on implementing practical browser-side encryption and baseline operational hardening, not just real-time messaging.
 
