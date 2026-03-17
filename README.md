@@ -1,82 +1,110 @@
 <div align="center">
-  <a href="./README_en.md">English</a> | 简体中文
+  <p>End-to-End Encrypted Chat Application / 端到端加密聊天系统</p>
+  <p>
+    <a href="#english">English</a> •
+    <a href="#简体中文">简体中文</a>
+  </p>
 </div>
 
-# E2EE Chat Space (端到端加密即时通讯系统)
+---
 
-![Go](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat-square&logo=go)
-![React](https://img.shields.io/badge/React-19.0-61DAFB?style=flat-square&logo=react)
-![WebSocket](https://img.shields.io/badge/WebSocket-Enabled-blue?style=flat-square)
-![Cryptography](https://img.shields.io/badge/Security-E2EE-blueviolet?style=flat-square)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql)
+<h2 id="english">🇬🇧 English</h2>
 
-本项目是一个专注于隐私安全与实时通信的高级实验性即时通讯系统。核心架构基于**零信任 (Zero-Trust)** 模型，通过客户端原生加密确保消息在整个生命周期内（传输中、静态存储）均处于密文状态。
+# E2EE Chat (Go + React + PostgreSQL)
 
-## 🔐 安全架构深度解析
+A secure, decoupled End-to-End Encrypted (E2EE) chat room application ensuring absolute privacy:
+- **Backend**: Go HTTP API + Native WebSocket (Zero-knowledge: does not decrypt messages).
+- **Frontend**: React + Web Crypto API (Client-side encryption/decryption).
+- **Database**: PostgreSQL (Only stores encrypted payload ciphertexts).
 
-### 1. 端到端加密流程 (E2EE Workflow)
-系统不依赖于任何中心化的加解密服务，所有密码学操作均在用户设备端完成：
-- **密钥生成**: 每个独立设备启动时，通过 `crypto.subtle` 生成 RSA-OAEP (2048-bit) 非对称密钥对。
-- **初始握手**: 建立会话时，双方交换公钥并利用 RSA 加密传输临时的 AES-256 会话密钥（Session Key）。
-- **消息流加密**: 实时对话采用 **AES-GCM** 对称加密。GCM 模式不仅提供机密性，还内置了身份验证标签（Auth Tag），能有效防御重放攻击与报文篡改。
+### 🚀 Quick Start (30 Seconds)
 
-### 2. 零知识中继 (Zero-Knowledge Relay)
-Go 后端服务被设计为纯粹的数据平面：
-- **报文结构**: 报文由 `Header` (包含签名与目标 ID) 和 `Payload` (加密内容) 组成。
-- **服务器职责**: 验证发送方签名 -> 根据目标 ID 路由报文 -> 转发至 WebSocket 管道。
-- **隐私保护**: 数据库仅记录“某人向某人发送了报文”，而不具备解析报文内容的技术可能性。
-
-### 3. 多设备一致性模型
-系统支持多设备同步。通过一种类似于 Signal 的双棘轮算法（Double Ratchet）简化版逻辑，确保同一账户的不同物理设备能够独立处理各自的加密上下文。
-
-## 🏗️ 技术实现细节
-
-### 后端层 (Go 1.23)
-- **并发 Hub 治理**: 利用 `sync.Map` 与 `channels` 构建高性能的消息分发中心，单实例可支撑数万个活跃连接。
-- **数据库驱动**: 采用高性能的 `pgx/v5` 驱动，利用其二进制协议加速元数据的读取。
-
-### 前端层 (React 19)
-- **Web Crypto 原生驱动**: 弃用所有第三方加密 JS 库，直接调用浏览器硬件加速的 Web Crypto API，规避侧信道泄露风险。
-- **状态总线**: 结合 React Context 封装 WebSocket 的重连、心跳与加密状态机逻辑。
-
-## 📂 项目结构规范
-
-```text
-message/
-├── backend/                # Go 高并发后端
-│   ├── internal/
-│   │   ├── hub/            # WebSocket 连接池与实时路由引擎
-│   │   ├── auth/           # 基于设备公钥指纹的身份认证
-│   │   └── storage/        # 针对大规模加密报文优化的存储层
-│   └── migrations/         # 包含设备管理索引的 SQL 迁移脚本
-├── frontend/               # React 安全前端
-│   ├── src/
-│   │   ├── crypto/         # 核心加解密库封装 (RSA/AES/SHA)
-│   │   ├── store/          # 客户端加密消息的索引与存储
-│   │   └── hooks/          # 实时消息流处理的生命周期管理
-└── docker-compose.yml      # 包含 PostgreSQL 与后端服务的完整镜像配置
-```
-
-## 🚀 部署指南
-
-### 1. 物理环境
-- Go >= 1.23
-- Node.js >= 20
-- PostgreSQL >= 16
-
-### 2. 启动流程
 ```bash
-# 进入后端目录并引导
-cd backend && go run cmd/server/main.go
-
-# 进入前端目录并启动
-cd frontend && npm install && npm run dev
+cp .env.example .env
+docker compose up -d --build
 ```
 
-## 🗺️ 未来展望
-- [ ] 增加基于 WebRTC 的端到端加密音视频通话。
-- [ ] 实现加密附件的分布式分片存储方案。
-- [ ] 引入完全的 Forward Secrecy (前向保密) 机制。
+Access the application at:
+- **Frontend**: `http://localhost:8088`
+- **Backend Health Check**: `http://localhost:8081/healthz`
 
-## 许可证
-本项目遵循 MIT License 协议。
+> **Note**: E2E encryption using Web Crypto API requires a secure context (HTTPS) for production or testing on remote servers.
+
+### 🛡 Security Model
+
+- **Forward Secrecy**: Implements the core Signal protocol flow (`X3DH + Double Ratchet`), including Signed PreKey verification and offline OPK handshakes.
+- **Client-Side Persistence**: Decrypted messages are securely stored in the browser's IndexedDB, encrypted with AES-GCM.
+- **Zero-Knowledge Backend**: The server only routes and stores encrypted payloads (`ciphertext` + `wrappedKeys`).
+- **Secure Identity**: Generates `X25519` and `Ed25519` keys locally. Private keys are marked as non-extractable `CryptoKey` objects in IndexedDB.
+- **Session Security**: Utilizes `httpOnly + SameSite=Strict` cookies with CSRF double-submit token validation. No authentication tokens are stored in `localStorage`.
+- **Closed Registration**: Public registration is disabled by default. Administrators must manually provision user accounts.
+
+### ⚙️ Architecture & Deployment
+
+#### Running Modes
+- **Docker Compose**: The recommended default. Database and backend connection strings are automatically configured.
+- **Host Deployment**: For environments restricted from Docker Hub, compile the Go binary directly and serve the frontend via Caddy or Nginx.
+
+#### API Overview
+- `POST /api/login` & `POST /api/logout`: Session management.
+- `POST /api/admin/users`: Admin-only route to provision new users.
+- `GET /api/rooms/:id/messages`: Fetch historical ciphertext payloads.
+- Signal Key Exchange Endpoints: `/api/signal/prekey-bundle` & `/api/signal/safety-number/:userId`.
+
+#### WebSocket Protocol
+- Connect via `/ws?room_id=<roomID>` (Cookie authenticated).
+- Emits and broadcasts `key_announce` and `ciphertext` payloads dynamically to online peers.
+
+### 📄 License
+MIT License.
+
+---
+
+<h2 id="简体中文">🇨🇳 简体中文</h2>
+
+# E2EE Chat (Go + React + PostgreSQL)
+
+一个高度安全的前后端分离端到端加密（E2EE）聊天室。系统采用零信任架构，确保服务器在任何情况下都无法读取用户的聊天明文：
+- **后端**: Go HTTP API + 原生 WebSocket（仅负责密文路由，不解密消息）。
+- **前端**: React + Web Crypto API（在浏览器客户端完成所有加解密运算）。
+- **数据库**: PostgreSQL（仅持久化密文 payload）。
+
+### 🚀 快速上手（30 秒）
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+启动后默认访问：
+- **前端界面**：`http://localhost:8088`
+- **后端健康检查**：`http://localhost:8081/healthz`
+
+> **注意**：由于浏览器安全策略，Web Crypto API 的端到端加密功能要求运行在安全上下文（HTTPS/localhost）下。如需在公网服务器测试，请务必配置 HTTPS 代理。
+
+### 🛡 核心安全模型
+
+- **前向保密与协议升级**：前端消息协议完整复刻了 Signal 的核心流程：`X3DH + Double Ratchet`（包含 Signed PreKey 签名校验、OPK 离线握手与跳号消息密钥缓存）。
+- **零信任服务端**：服务端仅接收并存储数据结构上的密文（`ciphertext` + `wrappedKeys`），对明文内容一无所知。
+- **本地密钥保险箱**：每个用户在浏览器本地生成 `X25519` 身份密钥与 `Ed25519` 签名密钥，私钥以不可导出的 `CryptoKey` 形式严密保存在 IndexedDB 中。
+- **严格的会话管理**：废弃 `localStorage` 存储 Token 的做法，登录会话全面改用 `httpOnly + SameSite=Strict` Cookie，所有写操作接口均启用 CSRF 校验（双提交机制）。
+- **封闭式注册**：为了确保内部群组的纯净与安全，`/api/register` 公开注册接口被硬性禁用，必须由系统管理员通过后台开通账号。
+
+### ⚙️ 部署与架构
+
+#### 运行模式
+- **Docker Compose**：开箱即用的推荐方式。配置文件会自动组装数据库与后端的连接，无需手动干预。
+- **宿主机直装**：若服务器无法拉取 Docker Hub 镜像，可直接编译 Go 服务（已内置 `golang-migrate` 自动建表），并通过 Caddy/Nginx 提供前端静态托管及反向代理。
+
+#### 核心 API 概览
+- `POST /api/login` & `POST /api/logout`：用户身份鉴权与会话销毁。
+- `POST /api/admin/users`：管理员创建普通用户的专属接口。
+- `GET /api/rooms/:id/messages`：拉取加密的聊天历史记录。
+- Signal 密钥交换接口：`/api/signal/prekey-bundle` 与 `/api/signal/safety-number/:userId`。
+
+#### WebSocket 通讯协议
+- 通过 `/ws?room_id=<roomID>` 建立连接（由 Cookie 隐式鉴权，握手阶段内置 IP 限流）。
+- 实时广播上下行的 `key_announce`（公钥宣发）与 `ciphertext`（密文消息）。
+
+### 📄 许可证
+本项目使用 MIT License 协议开源。
