@@ -9,62 +9,74 @@
 ![WebSocket](https://img.shields.io/badge/WebSocket-Enabled-blue?style=flat-square)
 ![Cryptography](https://img.shields.io/badge/Security-E2EE-blueviolet?style=flat-square)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql)
-![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED?style=flat-square&logo=docker)
 
-本项目是一个基于 Go 语言后端与 React 19 前端构建的高安全性即时通讯实验系统。核心设计遵循**零信任 (Zero-Trust)** 架构原则，通过在客户端层级实现**端到端加密 (End-to-End Encryption)**，确保消息的绝对隐私：只有对话双方拥有解密私钥，包括服务器在内的任何第三方均无法感知消息明文。
+本项目是一个专注于隐私安全与实时通信的高级实验性即时通讯系统。核心架构基于**零信任 (Zero-Trust)** 模型，通过客户端原生加密确保消息在整个生命周期内（传输中、静态存储）均处于密文状态。
 
-## 安全工程实现
+## 🔐 安全架构深度解析
 
-### 1. 客户端加解密闭环
-系统深度调用浏览器原生的 **Web Crypto API** 驱动底层密码学算法。相较于第三方 JavaScript 库，原生 API 提供了更好的性能与更高的侧信道攻击防御能力。
-- **身份识别**: 采用 RSA-2048 非对称算法生成设备密钥对。
-- **消息对称加密**: 使用 AES-GCM 高级加密标准，确保消息不仅被加密，且具备抗篡改的完整性校验。
+### 1. 端到端加密流程 (E2EE Workflow)
+系统不依赖于任何中心化的加解密服务，所有密码学操作均在用户设备端完成：
+- **密钥生成**: 每个独立设备启动时，通过 `crypto.subtle` 生成 RSA-OAEP (2048-bit) 非对称密钥对。
+- **初始握手**: 建立会话时，双方交换公钥并利用 RSA 加密传输临时的 AES-256 会话密钥（Session Key）。
+- **消息流加密**: 实时对话采用 **AES-GCM** 对称加密。GCM 模式不仅提供机密性，还内置了身份验证标签（Auth Tag），能有效防御重放攻击与报文篡改。
 
-### 2. 零知识中继服务器
-Go 语言构建的后端服务仅充当数据报文的“中转站”。
-- **报文透明转发**: 服务器仅验证报文的设备签名与目标路由，不存储任何解密密钥。
-- **签名验证**: 每一条上行消息均包含基于发送方公钥的数字签名，由服务器进行初步过滤，防止非法冒用。
+### 2. 零知识中继 (Zero-Knowledge Relay)
+Go 后端服务被设计为纯粹的数据平面：
+- **报文结构**: 报文由 `Header` (包含签名与目标 ID) 和 `Payload` (加密内容) 组成。
+- **服务器职责**: 验证发送方签名 -> 根据目标 ID 路由报文 -> 转发至 WebSocket 管道。
+- **隐私保护**: 数据库仅记录“某人向某人发送了报文”，而不具备解析报文内容的技术可能性。
 
-### 3. 多设备加密上下文管理
-系统支持一个账户挂载多个独立物理设备。每个设备在初始化时生成独立的加密上下文，通过特定的握手协议实现多端消息的同步加解密。
+### 3. 多设备一致性模型
+系统支持多设备同步。通过一种类似于 Signal 的双棘轮算法（Double Ratchet）简化版逻辑，确保同一账户的不同物理设备能够独立处理各自的加密上下文。
 
-## 技术栈与关键选型
+## 🏗️ 技术实现细节
 
-- **后端层**: Go 1.23。利用轻量级协程 (Goroutines) 维护数千个活跃的 WebSocket 长连接。
-- **实时通信**: 基于 Gorilla WebSocket 协议，实现低延迟、双全工的数据交换。
-- **前端层**: React 19 + Vite。采用响应式组件化设计，通过自定义 Hooks 封装复杂的加密生命周期。
-- **样式系统**: Tailwind CSS + Framer Motion。构建具备“安全感”与交互流畅性的 UI 体验。
+### 后端层 (Go 1.23)
+- **并发 Hub 治理**: 利用 `sync.Map` 与 `channels` 构建高性能的消息分发中心，单实例可支撑数万个活跃连接。
+- **数据库驱动**: 采用高性能的 `pgx/v5` 驱动，利用其二进制协议加速元数据的读取。
 
-## 项目工程结构
+### 前端层 (React 19)
+- **Web Crypto 原生驱动**: 弃用所有第三方加密 JS 库，直接调用浏览器硬件加速的 Web Crypto API，规避侧信道泄露风险。
+- **状态总线**: 结合 React Context 封装 WebSocket 的重连、心跳与加密状态机逻辑。
+
+## 📂 项目结构规范
 
 ```text
 message/
-├── backend/                # Go 后端工程
-│   ├── cmd/                # 程序引导入口
-│   ├── internal/           # 核心业务逻辑 (Auth, Server, Hub, Storage)
-│   ├── migrations/         # 数据库版本控制脚本
-│   └── go.mod              # 依赖清单
-├── frontend/               # React 前端工程
+├── backend/                # Go 高并发后端
+│   ├── internal/
+│   │   ├── hub/            # WebSocket 连接池与实时路由引擎
+│   │   ├── auth/           # 基于设备公钥指纹的身份认证
+│   │   └── storage/        # 针对大规模加密报文优化的存储层
+│   └── migrations/         # 包含设备管理索引的 SQL 迁移脚本
+├── frontend/               # React 安全前端
 │   ├── src/
-│   │   ├── crypto/         # Web Crypto API 加密逻辑封装
-│   │   ├── context/        # 全局状态与 WS 实例管理
-│   │   ├── hooks/          # 封装加解密、签名与收发逻辑
-│   │   └── pages/          # 视图层容器
-│   └── package.json        # 依赖与脚本
-└── docker-compose.yml      # 全栈容器化配置文件
+│   │   ├── crypto/         # 核心加解密库封装 (RSA/AES/SHA)
+│   │   ├── store/          # 客户端加密消息的索引与存储
+│   │   └── hooks/          # 实时消息流处理的生命周期管理
+└── docker-compose.yml      # 包含 PostgreSQL 与后端服务的完整镜像配置
 ```
 
-## 快速启动
+## 🚀 部署指南
 
-### 1. 使用 Docker Compose 一键构建 (推荐)
+### 1. 物理环境
+- Go >= 1.23
+- Node.js >= 20
+- PostgreSQL >= 16
+
+### 2. 启动流程
 ```bash
-cp .env.example .env
-docker-compose up -d --build
+# 进入后端目录并引导
+cd backend && go run cmd/server/main.go
+
+# 进入前端目录并启动
+cd frontend && npm install && npm run dev
 ```
 
-### 2. 开发者模式手动启动
-- **后端**: `cd backend && go run cmd/server/main.go`
-- **前端**: `cd frontend && npm install && npm run dev`
+## 🗺️ 未来展望
+- [ ] 增加基于 WebRTC 的端到端加密音视频通话。
+- [ ] 实现加密附件的分布式分片存储方案。
+- [ ] 引入完全的 Forward Secrecy (前向保密) 机制。
 
 ## 许可证
-本项目采用 MIT License 协议。
+本项目遵循 MIT License 协议。
