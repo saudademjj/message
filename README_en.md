@@ -1,6 +1,7 @@
+English | [简体中文](README.md)
+
 # E2EE Chat
 
-English | [简体中文](README.md)
 
 `E2EE Chat` is a full-stack end-to-end encrypted chat application built with a Go backend, a React frontend, and PostgreSQL as ciphertext storage. The project focuses on implementing practical browser-side encryption and baseline operational hardening, not just real-time messaging.
 
