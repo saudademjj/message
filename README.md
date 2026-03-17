@@ -1,89 +1,87 @@
+<div align="center">
+  <a href="./README.md">简体中文</a> | <a href="./README_en.md">English</a>
+</div>
+
 # E2EE Chat Space (端到端加密即时通讯系统)
 
-本项目是一个基于 Go 和 React 19 构建的高安全性即时通讯实验系统。核心设计目标是实现端到端加密 (E2EE)，确保消息在客户端层进行加解密，服务器仅作为中继节点，不涉及明文数据的处理与存储。
+![Go](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat-square&logo=go)
+![React](https://img.shields.io/badge/React-19.0-61DAFB?style=flat-square&logo=react)
+![WebSocket](https://img.shields.io/badge/WebSocket-Enabled-blue?style=flat-square)
+![Cryptography](https://img.shields.io/badge/Security-E2EE-blueviolet?style=flat-square)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql)
+![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED?style=flat-square&logo=docker)
 
-This project is a high-security instant messaging experimental system built with Go and React 19. The core design goal is to implement End-to-End Encryption (E2EE), ensuring that messages are encrypted and decrypted at the client layer, with the server acting solely as a relay node without processing or storing plaintext data.
+E2EE Chat Space 是一个基于 Go 语言和 React 19 开发的安全即时通讯实验系统。项目的核心工程目标是实现**端到端加密 (End-to-End Encryption)**，即通过非对称加密算法确保消息在发出前已在客户端完成加密，且私钥始终由客户端持有。服务器在此过程中仅承担消息中转（Relay）职能，无法感知消息的具体内容。
 
-## 核心特性 / Core Features
+E2EE Chat Space is a secure instant messaging experimental system developed with Go and React 19. The core engineering goal is to implement End-to-End Encryption (E2EE), ensuring that messages are encrypted at the client-side using asymmetric algorithms before transmission, with private keys always staying on the client. The server acts solely as a relay node, possessing no knowledge of the message content.
 
-- 端到端加密 (E2EE / End-to-End Encryption):
-    - 采用浏览器原生 Web Crypto API 实现。 / Implemented using browser-native Web Crypto API.
-    - 消息在发出前利用接收方的公钥加密，仅接收方私钥可解密。 / Messages encrypted with recipient's public key before sending.
+## 安全工程实践 / Security Engineering Practices
 
-- 设备指纹与管理 (Device Fingerprinting & Management):
-    - 支持多设备登录，每个设备拥有独立的加密上下文。 / Supports multi-device login with independent encryption contexts.
-    - 提供精细化的设备列表管理与身份验证机制。 / Granular device list management and authentication mechanisms.
+### 1. 客户端加解密逻辑 (Client-side Cryptography)
+- **Web Crypto API**: 利用浏览器原生的 Web Crypto API 驱动 RSA 与 AES 算法，避免第三方 JS 库带来的侧信约风险。 / Native browser crypto for RSA/AES to minimize side-channel risks.
+- **非对称与对称结合**: 采用 RSA 进行身份识别与初始密钥协商，通过 AES-GCM 进行大批量消息的流式加解密。 / RSA for identity and key agreement; AES-GCM for bulk message streaming.
 
-- 消息完整性校验 (Message Integrity & Non-repudiation):
-    - 所有消息传输均附带数字签名，防止中间人篡改。 / All message transmissions include digital signatures to prevent MITM tampering.
-    - 结合时间戳与随机盐值防止重放攻击。 / Replay attack prevention using timestamps and salts.
+### 2. 零信任服务器架构 (Zero-trust Server Architecture)
+- **中继模式**: Go 后端仅负责维护 WebSocket 的长连接状态与加密报文的转发。 / Go backend solely maintains WS connections and forwards encrypted payloads.
+- **签名校验**: 所有上行报文均包含设备级的数字签名，服务器通过存储的公钥进行完整性校验，确保报文未经篡改。 / Device-level digital signatures for message integrity verification.
 
-- 实时双全工通信 (Full-duplex Real-time Communication):
-    - 基于 WebSocket 协议实现低延迟消息投递。 / Low-latency message delivery based on the WebSocket protocol.
-    - 集成心跳包检测与自动重连算法。 / Integrated heartbeat detection and auto-reconnect algorithms.
+### 3. 设备与身份生命周期 (Device & Identity Lifecycle)
+- **多设备支持**: 每个账户支持挂载多个物理设备，系统为每个设备维护独立的加密上下文。 / Independent encryption contexts per physical device.
+- **密钥旋转**: 逻辑设计预留了密钥旋转接口，以应对长周期的安全需求。 / Architectural provision for long-term key rotation.
 
-## 技术栈 / Technical Stack
+## 技术架构 / Technical Stack Analysis
 
-### 后端层 / Backend Layer
-- Go 1.23: 核心并发模型与高性能逻辑处理。 / Core concurrency model and high-performance processing.
-- Gorilla WebSocket: 标准化的 WebSocket 服务端实现。 / Standardized WebSocket server implementation.
-- PostgreSQL: 存储设备信息、用户信息与加密后的消息载荷。 / Stores device, user info, and encrypted payloads.
-- golang-jwt: 实现基础的基于 Token 的身份验证。 / Base token-based authentication.
+### 后端 / Backend (Golang)
+- **高并发实时层**: 利用 Goroutines 处理数千个 WebSocket 节点的并发连接。 / High-concurrency WS handling via Goroutines.
+- **存储与持久化**: 使用 pgx 驱动连接 PostgreSQL，存储设备公钥元数据、群组关系及离线加密消息。 / PostgreSQL for metadata and offline encrypted payloads.
+- **鉴权**: JWT 集成数字签名双重验证。 / JWT with additional digital signature validation.
 
-### 前端层 / Frontend Layer
-- React 19: 采用现代组件化架构与 Hook 治理。 / Modern component-based architecture and hooks.
-- Web Crypto API: 提供底层 RSA/AES 算法支持。 / Low-level RSA/AES algorithm support.
-- Framer Motion: 提供流畅的界面转场与交互动效。 / Fluid interface transitions and interactive animations.
-- Tailwind CSS: 响应式 UI 布局构建。 / Responsive UI layout construction.
+### 前端 / Frontend (React 19)
+- **响应式状态管理**: React Context 结合自定义 Hook 维护加密状态。 / React Context & hooks for crypto state management.
+- **UI 框架**: Tailwind CSS 配合 Framer Motion 提供具备安全感且交互流畅的视觉体验。 / Tailwind CSS & Framer Motion for secure and fluid UI.
 
-## 项目结构 / Project Structure
+## 项目结构解析 / Project Structure
 
 ```text
-message/
-├── backend/                # Go 后端工程实现 / Go backend implementation
-│   ├── cmd/                # 程序入口目录 / Application entry points
-│   │   └── server/         # 主服务入口 / Main server entry
-│   ├── internal/           # 内部业务逻辑封装 / Internal business logic
-│   │   ├── server/         # HTTP & WebSocket 服务治理 / HTTP & WS service management
-│   │   ├── auth/           # 认证与设备管理逻辑 / Auth and device management
-│   │   └── storage/        # 数据库持久层接口 / DB persistence interfaces
-│   ├── migrations/         # SQL 模式迁移脚本 / SQL schema migration scripts
-│   └── go.mod              # Go 依赖清单 / Go dependency manifest
-├── frontend/               # React 前端工程实现 / React frontend implementation
+.
+├── backend/                # Go 后端工程 / Go Backend
+│   ├── cmd/                # 入口函数，包含配置加载逻辑 / Entry points and config loading
+│   ├── internal/           # 核心业务逻辑实现 / Core business logic
+│   │   ├── auth/           # 认证中间件与签名校验逻辑 / Auth & Sig-verification
+│   │   ├── server/         # WebSocket Hub 与 HTTP 路由治理 / WS Hub & Routing
+│   │   └── storage/        # 持久化存储接口封装 / Persistence interfaces
+│   ├── migrations/         # 结构化 SQL 迁移脚本 / SQL schema migrations
+│   └── go.mod              # 模块依赖清单 / Dependency manifest
+├── frontend/               # React 前端工程 / React Frontend
 │   ├── src/
-│   │   ├── crypto/         # E2EE 核心加解密库封装 / E2EE core crypto wrappers
-│   │   ├── context/        # 状态总线与加密上下文管理 / State bus and crypto context
-│   │   ├── hooks/          # 通讯钩子 (WS 连接、消息收发) / Communication hooks (WS, messaging)
-│   │   └── components/     # UI 组件库 / UI component library
-│   ├── package.json        # 前端依赖清单 / Frontend dependencies
-│   └── vite.config.ts      # Vite 编译配置 / Vite build configuration
-├── docker-compose.yml      # 全栈部署编排配置 / Full-stack deployment orchestration
-└── deploy-restart.sh       # 自动化重部署脚本 / Automated redeployment script
+│   │   ├── crypto/         # 加密逻辑的核心抽象与封装 / Core crypto abstractions
+│   │   ├── context/        # 全局加密上下文与 WS 连接管理 / Crypto context & WS management
+│   │   ├── hooks/          # 通讯生命周期钩子 / Communication life-cycle hooks
+│   │   └── pages/          # 视图层容器 / View containers
+│   └── package.json        # 依赖清单 / Dependency list
+└── docker-compose.yml      # 全栈容器化编排 / Full-stack orchestration
 ```
 
 ## 快速启动 / Quick Start
 
-### 1. 容器化一键部署 / One-click Deployment via Docker
+### 1. 基础环境 / Environment
+- Go 1.23+
+- Node.js 20+
+- PostgreSQL 16
+
+### 2. 一键构建 / Build & Run
 ```bash
+# 复制并配置环境变量 / Config environment
 cp .env.example .env
+
+# 使用 Docker Compose 启动全量服务 / Launch via Docker
 docker-compose up -d --build
 ```
 
-### 2. 开发者模式 / Developer Mode
-后端 / Backend:
-```bash
-cd backend && go run cmd/server/main.go
-```
-前端 / Frontend:
-```bash
-cd frontend && npm install && npm run dev
-```
-
-## 未来计划 / Roadmap
-
-- [ ] 实现群聊多方密钥协商 (MPK - Multi-party Key Agreement)
-- [ ] 增加消息阅后即焚功能 (Self-destructing Messages)
-- [ ] 接入 WebRTC 实现端到端加密的音视频通话 (E2EE Voice/Video Calls)
+## 未来路线图 / Roadmap
+- [ ] 完善 Forward Secrecy (前向保密) 机制。
+- [ ] 增加基于群组密钥协商的加密群聊功能。
+- [ ] 实现加密附件的分布式存储与分发。
 
 ## 许可证 / License
-本项目采用 [MIT License](LICENSE) 协议。 / This project is licensed under the MIT License.
+本项目采用 MIT License 协议。 / Licensed under the MIT License.
