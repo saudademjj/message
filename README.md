@@ -1,6 +1,7 @@
+[English](README_en.md) | 简体中文
+
 # E2EE Chat
 
-[English](README_en.md) | 简体中文
 
 `E2EE Chat` 是一个前后端分离的端到端加密聊天室：
 
