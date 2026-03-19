@@ -5,70 +5,134 @@
 # E2EE Chat -- 端到端加密聊天系统
 
 ![Go](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat-square&logo=go)
-![React](https://img.shields.io/badge/React-19.0-61DAFB?style=flat-square&logo=react)
+![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql)
 ![WebSocket](https://img.shields.io/badge/WebSocket-Native-010101?style=flat-square)
 ![WebCrypto](https://img.shields.io/badge/Web_Crypto-API-blueviolet?style=flat-square)
 
-一个安全、解耦的端到端加密（E2EE）聊天室应用，确保绝对隐私。后端基于 Go 构建，作为零知识中继层不参与任何解密操作；前端基于 React + Web Crypto API 实现客户端加解密；数据库仅存储密文载荷。
+一个注重隐私的端到端加密聊天应用。后端基于 Go 构建，作为零知识中继层不参与任何解密操作；前端基于 React 19 + Web Crypto API 实现纯客户端加解密；数据库仅存储密文载荷，服务端在技术上无法获取明文内容。
+
+---
 
 ## 核心安全架构
 
 ### 端到端加密工作流
 
-系统不依赖集中式解密服务，所有密码学操作均在用户设备上完成：
+所有密码学操作均在用户设备上完成，系统不依赖集中式解密服务：
 
-- 密钥生成：每台设备初始化时通过 `crypto.subtle` 生成 RSA-OAEP（2048-bit）非对称密钥对
-- 初始握手：建立会话时，双方交换公钥，使用 RSA 安全传输临时 AES-256 会话密钥
-- 流式加密：实时对话采用 AES-GCM 对称加密，GCM 模式同时提供机密性保障和认证标签，防御重放攻击与数据包篡改
+- 密钥生成 -- 每台设备初始化时通过 `crypto.subtle` 生成 RSA-OAEP（2048-bit）非对称密钥对
+- 初始握手 -- 建立会话时双方交换公钥，使用 RSA 安全传输临时 AES-256 会话密钥
+- 流式加密 -- 实时对话采用 AES-GCM 对称加密，GCM 模式同时提供机密性保障和认证标签，防御重放攻击与数据包篡改
+- 身份轮换 -- 密钥每 240 分钟自动轮换，保留最近 6 组历史密钥用于解密过渡期消息
 
 ### 零知识中继
 
 Go 后端被设计为纯数据平面：
 
-- 数据包结构：由 Header（包含签名和目标 ID）和加密 Payload 组成
-- 服务端职责：验证发送方签名 -> 根据目标 ID 路由 -> 转发至 WebSocket 管道
-- 隐私保证：数据库仅记录元数据（谁发送了什么给谁），服务端在技术上无法解密载荷内容
+- 数据包结构 -- 由 Header（包含签名和目标 ID）和加密 Payload 组成
+- 服务端职责 -- 验证发送方签名 -> 根据目标 ID 路由 -> 转发至 WebSocket 管道
+- 隐私保证 -- 数据库仅记录元数据（谁发送了什么给谁），载荷内容始终为密文
 
-### 多设备一致性模型
+### 多设备一致性
 
-支持多设备同步。采用类似 Signal Double Ratchet 算法的简化逻辑，同一账户下的不同物理设备独立管理各自的加密上下文。
+支持多设备同步，采用类似 Signal Double Ratchet 算法的简化逻辑，同一账户下的不同物理设备独立管理各自的加密上下文。
 
-## 技术实现细节
+---
+
+## 技术栈
 
 ### 后端（Go 1.23）
 
-- 并发 Hub 管理：基于 `sync.Map` 和 `channels` 构建高性能消息分发中心，单实例可支撑数万活跃连接
-- 数据库驱动：使用高性能 `pgx/v5` 驱动，利用其二进制协议实现快速元数据检索
-- 设备指纹认证：基于设备唯一标识的身份验证机制
-- WebSocket 连接池：自动管理连接生命周期、心跳检测与断线重连
+| 技术 | 说明 |
+|------|------|
+| Go `net/http` | 标准库 HTTP 服务 |
+| gorilla/websocket | WebSocket 连接管理 |
+| pgx/v5 | 高性能 PostgreSQL 驱动（二进制协议） |
+| golang-jwt/jwt | JWT 身份认证 |
+| golang-migrate | 数据库迁移管理 |
+| golang.org/x/crypto | bcrypt 密码哈希 |
+| golang.org/x/time | 速率限制 |
+
+核心能力：
+
+- 并发 Hub 管理 -- 基于 `sync.Map` 和 `channels` 构建消息分发中心
+- 设备指纹认证 -- 基于设备唯一标识的身份验证机制
+- WebSocket 连接池 -- 自动管理连接生命周期、心跳检测与断线重连
+- 速率限制 -- 登录 30 次/分钟/IP，WebSocket 60 次/分钟/IP
+- 优雅关闭 -- 20 秒超时的 Graceful Shutdown
 
 ### 前端（React 19）
 
-- 原生 Web Crypto：摒弃第三方 JS 加密库，使用硬件加速的 Web Crypto API 以降低侧信道风险
-- 状态总线：通过 React Context 封装 WebSocket 重连、心跳和加密状态机
-- 客户端索引：本地建立加密消息的索引结构，支持离线消息检索
+| 技术 | 说明 |
+|------|------|
+| React 19 | UI 框架，支持并发特性 |
+| React Router 6 | 客户端路由 |
+| Zustand 5 | 轻量状态管理 |
+| Vite 5 | 构建工具 |
+| Vitest | 单元测试框架 |
+| marked + highlight.js | Markdown 渲染与代码高亮 |
+| DOMPurify | XSS 防护 |
+| emoji-picker-react | 表情选择器 |
 
-## 目录结构
+核心能力：
+
+- 原生 Web Crypto -- 使用硬件加速的 Web Crypto API，摒弃第三方加密库以降低侧信道风险
+- 客户端索引 -- 本地建立加密消息的索引结构，支持离线消息检索
+- 消息签名验证 -- 发送端签名 + 接收端验证，确保消息完整性
+
+### 数据库
+
+| 技术 | 说明 |
+|------|------|
+| PostgreSQL 16 | 关系型数据库 |
+| golang-migrate | Schema 迁移管理 |
+
+---
+
+## 项目结构
 
 ```text
 message/
-├── backend/                # Go 并发后端
-│   ├── cmd/
-│   │   └── server/         # 服务入口
-│   ├── internal/
-│   │   ├── hub/            # WebSocket 连接池与路由引擎
-│   │   ├── auth/           # 设备指纹认证模块
-│   │   └── storage/        # 加密载荷的优化存储
-│   └── migrations/         # SQL 脚本（含设备管理索引）
-├── frontend/               # React 安全前端
+├── backend/
+│   ├── cmd/server/                 # 服务入口
+│   │   └── main.go
+│   ├── internal/server/
+│   │   ├── hub.go                  # WebSocket 连接池与消息路由
+│   │   ├── ws_service.go           # WebSocket 服务逻辑
+│   │   ├── handlers_auth.go        # 认证接口
+│   │   ├── handlers_rooms.go       # 聊天室管理
+│   │   ├── handlers_signal.go      # 信令交换
+│   │   ├── handlers_devices.go     # 设备管理
+│   │   ├── middleware.go           # 中间件（认证、CORS、日志）
+│   │   ├── rate_limit.go           # 速率限制
+│   │   ├── signature.go            # 消息签名验证
+│   │   ├── storage.go              # 数据持久化
+│   │   ├── config.go               # 配置管理
+│   │   ├── migrations.go           # 数据库迁移
+│   │   └── *_test.go               # 单元测试
+│   └── migrations/                 # SQL 迁移脚本
+├── frontend/
 │   ├── src/
-│   │   ├── crypto/         # 密码学封装（RSA/AES/SHA）
-│   │   ├── store/          # 加密消息的客户端索引
-│   │   └── hooks/          # 实时流的生命周期管理
-├── docker-compose.yml      # 数据库与后端的完整镜像配置
-└── deploy-restart.sh       # 部署重启脚本
+│   │   ├── crypto/                 # 密码学封装
+│   │   │   ├── encrypt.ts          # RSA/AES 加解密
+│   │   │   ├── identity.ts         # 身份密钥管理
+│   │   │   ├── ratchet.ts          # 密钥轮换（Ratchet）
+│   │   │   ├── signature.ts        # 消息签名
+│   │   │   └── store.ts            # 密钥存储
+│   │   ├── contexts/               # React Context
+│   │   │   ├── AuthContext.tsx      # 认证状态
+│   │   │   ├── CryptoContext.tsx    # 加密状态机
+│   │   │   └── WebSocketContext.tsx # WebSocket 生命周期
+│   │   ├── hooks/                  # 自定义 Hooks
+│   │   ├── pages/                  # 页面组件
+│   │   ├── components/             # 通用组件
+│   │   └── stores/                 # Zustand 状态
+│   └── vitest.config.ts            # 测试配置
+├── docker-compose.yml              # 容器编排
+└── deploy-restart.sh               # 部署脚本
 ```
+
+---
 
 ## 快速开始
 
@@ -78,12 +142,13 @@ message/
 - Node.js >= 20
 - PostgreSQL >= 16
 
-### 使用 Docker Compose（推荐）
+### Docker Compose 部署（推荐）
 
 ```bash
 git clone https://github.com/saudademjj/message.git
 cd message
 cp .env.example .env
+# 编辑 .env，修改密码和密钥
 docker compose up -d --build
 ```
 
@@ -97,12 +162,43 @@ cd backend && go run cmd/server/main.go
 cd frontend && npm install && npm run dev
 ```
 
+### 环境变量说明
+
+在 `.env` 文件中配置：
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `POSTGRES_DB` | 数据库名 | chat |
+| `POSTGRES_USER` | 数据库用户 | chat |
+| `POSTGRES_PASSWORD` | 数据库密码 | - |
+| `JWT_SECRET` | JWT 签名密钥 | - |
+| `ACCESS_TOKEN_TTL_MINUTES` | 访问令牌有效期（分钟） | 15 |
+| `REFRESH_TOKEN_TTL_HOURS` | 刷新令牌有效期（小时） | 336 |
+| `CORS_ORIGIN` | 前端跨域地址 | http://localhost:8088 |
+| `VITE_API_BASE` | API 地址 | http://localhost:8081 |
+| `VITE_IDENTITY_ROTATE_MINUTES` | 密钥轮换间隔（分钟） | 240 |
+| `VITE_IDENTITY_KEY_HISTORY` | 历史密钥保留数量 | 6 |
+
+### 前端可用脚本
+
+```bash
+npm run dev             # 启动开发服务器
+npm run build           # 生产构建
+npm run test            # 运行测试
+npm run test:coverage   # 测试覆盖率
+npm run lint            # 代码检查
+```
+
+---
+
 ## 未来规划
 
 - [ ] 基于 WebRTC 实现 E2EE 语音和视频通话
 - [ ] 加密附件的分布式分片存储
 - [ ] 完整的前向保密（Forward Secrecy）集成
 
-## 许可证
+---
 
-MIT License
+## License
+
+[MIT](LICENSE)
