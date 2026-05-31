@@ -8,8 +8,9 @@ BACKEND_LOG="/opt/e2ee-chat/backend.log"
 CADDY_BIN="/usr/bin/caddy"
 CADDY_CONFIG="/opt/e2ee-chat/frontend/Caddyfile"
 CADDY_LOG="/opt/e2ee-chat/caddy.log"
-CHAT_SITE_HOST_DEFAULT="47.100.248.114"
+CHAT_SITE_HOST_DEFAULT="chat.example.com"
 BACKEND_HEALTH_URL="http://127.0.0.1:8081/healthz"
+FRONTEND_PROXY_MODE_DEFAULT="local"
 
 wait_pids_gone() {
     local pattern="$1"
@@ -86,6 +87,10 @@ stop_backend() {
 }
 
 stop_frontend_proxy() {
+    if [ "${frontend_proxy_mode}" = "systemd" ]; then
+        return
+    fi
+
     local pattern="${CADDY_BIN} run --config ${CADDY_CONFIG} --adapter caddyfile"
     existing_caddy_pids=$(pgrep -f "${pattern}" || true)
     if [ -n "${existing_caddy_pids}" ]; then
@@ -114,6 +119,12 @@ validate_frontend_proxy_config() {
 }
 
 start_frontend_proxy() {
+    if [ "${frontend_proxy_mode}" = "systemd" ]; then
+        sudo systemctl reload caddy
+        echo "Reloaded system Caddy service"
+        return
+    fi
+
     validate_frontend_proxy_config
     nohup "${CADDY_BIN}" run --config "${CADDY_CONFIG}" --adapter caddyfile > "${CADDY_LOG}" 2>&1 &
     caddy_pid=$!
@@ -149,6 +160,7 @@ wait_frontend_health() {
 }
 
 load_env
+frontend_proxy_mode="${FRONTEND_PROXY_MODE:-${FRONTEND_PROXY_MODE_DEFAULT}}"
 stop_backend
 stop_frontend_proxy
 start_backend

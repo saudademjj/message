@@ -12,3 +12,9 @@ backend/bin/
 backend/server
 backend/e2ee-chat-backend-linux-amd64
 bin/e2ee-chat-backend
+.rsync-deploy-exclude.txt
+
+# Local deploy scratch / secrets (never commit)
+.secrets_*.txt
+.deploy-*-plan.md
+.audit-*.md
