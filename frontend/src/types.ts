@@ -2,12 +2,16 @@ export interface User {
   id: number;
   username: string;
   role: 'admin' | 'user';
+  lastReadMessageId?: number;
 }
 
 export interface Room {
   id: number;
   name: string;
   createdAt: string;
+  lastMessageId: number | null;
+  lastActivityAt: string;
+  unreadCount: number;
 }
 
 export interface DeviceSnapshot {
@@ -16,6 +20,9 @@ export interface DeviceSnapshot {
   sessionVersion: number;
   createdAt: string;
   lastSeenAt: string;
+  trustStatus: 'approved' | 'pending';
+  pendingSince?: string | null;
+  approvedAt?: string | null;
   revokedAt?: string | null;
   current: boolean;
 }
@@ -23,6 +30,7 @@ export interface DeviceSnapshot {
 export interface WrappedKey {
   iv: string;
   wrappedKey: string;
+  recipientAad?: string;
   ratchetDhPublicKeyJwk?: JsonWebKey;
   messageNumber?: number;
   previousChainLength?: number;
@@ -92,24 +100,44 @@ export interface SignalPreKeyBundle {
   signedPreKey: SignalSignedPreKey;
   oneTimePreKey?: SignalOneTimePreKey;
   updatedAt?: string;
+  oneTimePreKeyConsumed?: boolean;
+  oneTimePreKeyLow?: boolean;
+  oneTimePreKeysLeft?: number;
 }
 
 export interface SignalPreKeyBundleList {
   userId: number;
   username?: string;
   devices: SignalPreKeyBundle[];
+  activeDeviceCount: number;
+  readyDeviceCount: number;
+  missingDeviceCount: number;
   updatedAt?: string;
 }
 
 export interface SafetyNumberHistoryEntry {
+  deviceId?: string;
   fingerprint: string;
   firstSeenAt: string;
   lastSeenAt: string;
 }
 
+export interface SafetyNumberDeviceSnapshot {
+  deviceId: string;
+  deviceName?: string;
+  identityKeyJwk: JsonWebKey;
+  identityFingerprint: string;
+  identityUpdatedAt: string;
+  safetyNumber: string;
+  targetHistory: SafetyNumberHistoryEntry[];
+}
+
 export interface SafetyNumberSnapshot {
   localUserId: number;
+  localDeviceId?: string;
   targetUserId: number;
+  targetDeviceId?: string;
+  targetDeviceName?: string;
   localIdentityKeyJwk: JsonWebKey;
   targetIdentityKeyJwk: JsonWebKey;
   localIdentityFingerprint: string;
@@ -118,6 +146,7 @@ export interface SafetyNumberSnapshot {
   targetIdentityUpdatedAt: string;
   safetyNumber: string;
   targetHistory: SafetyNumberHistoryEntry[];
+  devices?: SafetyNumberDeviceSnapshot[];
 }
 
 export interface DecryptAckFrame {
@@ -152,6 +181,17 @@ export interface DecryptRecoveryPayloadFrame {
   payload: CipherPayload;
 }
 
+export interface EnvelopeRefillRequestFrame {
+  type: 'envelope_refill_request';
+  roomId: number;
+  fromUserId: number;
+  fromUsername: string;
+  fromDeviceId?: string;
+  toUserId: number;
+  toDeviceId?: string;
+  messageIds: number[];
+}
+
 export interface TypingStatusFrame {
   type: 'typing_status';
   roomId: number;
@@ -166,6 +206,16 @@ export interface ReadReceiptFrame {
   fromUserId: number;
   fromUsername: string;
   upToMessageId: number;
+}
+
+export interface RoomSummariesFrame {
+  type: 'room_summaries';
+  rooms: Room[];
+}
+
+export interface RoomSummaryUpdateFrame {
+  type: 'room_summary_update';
+  room: Room;
 }
 
 export interface MessageUpdateFrame {
@@ -183,6 +233,14 @@ export interface MessageUpdateFrame {
 export interface ProtocolErrorFrame {
   type: 'protocol_error';
   roomId: number;
-  code: 'legacy_payload_not_supported' | 'invalid_payload_format';
+  code: 'legacy_payload_not_supported' | 'invalid_payload_format' | 'ciphertext_rate_limited' | 'websocket_auth_expired';
   message: string;
+}
+
+export interface UserBundleChangedFrame {
+  type: 'user_bundle_changed';
+  userId: number;
+  deviceId: string;
+  identityFingerprint: string;
+  updatedAt: string;
 }

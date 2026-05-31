@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useCryptoContext } from '../contexts/CryptoContext';
@@ -10,12 +11,14 @@ import { useComposerController } from './chatRoute/useComposerController';
 import { useChatRouteDataControllers } from './chatRoute/useChatRouteDataControllers';
 import { useChatRouteEffects } from './chatRoute/useChatRouteEffects';
 import { useChatRouteState } from './chatRoute/useChatRouteState';
+import { useProfileController } from './chatRoute/useProfileController';
+import { useSessionScopedReset } from './chatRoute/useSessionScopedReset';
 import type { ChatRoutePageProps } from './chatRoute/types';
 import { useChatRouteViewModel } from './chatRoute/useChatRouteViewModel';
 
 export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePageProps) {
   const navigate = useNavigate();
-  const { auth, logout } = useAuth();
+  const { auth, logout, refreshSession, updateAuthUser } = useAuth();
   const {
     identity,
     identityReady,
@@ -44,6 +47,14 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
   const setManagedUsers = useChatStore((state) => state.setManagedUsers);
   const resetSessionScopedState = useChatStore((state) => state.resetSessionScopedState);
   const peers = useChatStore((state) => state.peers);
+
+  // FIX: clear session-scoped store state on any auth user transition (forced
+  // logout, session expiry, or account switch in the same tab), not only on the
+  // manual logout button.
+  useSessionScopedReset({
+    authUserID: auth?.user.id ?? null,
+    resetSessionScopedState,
+  });
 
   const state = useChatRouteState({ setManagedUsers });
 
@@ -77,6 +88,8 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
     peerPopoverRef,
     roomModalCardRef,
     adminModalCardRef,
+    deviceModalCardRef,
+    profileModalCardRef,
     draftInputRef,
     typingIdleTimerRef,
     chatPathForRoom,
@@ -85,7 +98,7 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
     onAuthReset,
   } = state;
 
-  const { roomsController, sendQueueController, messagesController } = useChatRouteDataControllers({
+  const { roomsController, sendQueueController, messagesController, devicesController } = useChatRouteDataControllers({
     api,
     auth,
     routeMode,
@@ -134,6 +147,33 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
     setError,
     setInfo,
     reportError,
+  });
+
+  // FIX: after a username change, force the active room socket to reconnect so
+  // the backend re-reads the new username (it caches it at connect time). The
+  // useMessages open-listener refetches room members on reconnect, so member
+  // labels update too. Residual limitation: already-rendered historical message
+  // bubbles keep the sender's old `senderUsername` until the room is refetched
+  // or re-entered; this only guarantees forward propagation to peers + members.
+  const handleProfileUpdated = useCallback(() => {
+    const roomID = roomsController.selectedRoomID;
+    if (!roomID || roomID <= 0 || !wsConnected) {
+      return;
+    }
+    disconnect('username-changed');
+    connect({ roomID });
+  }, [roomsController.selectedRoomID, wsConnected, disconnect, connect]);
+
+  const profileController = useProfileController({
+    api,
+    auth,
+    refreshSession,
+    updateAuthUser,
+    setBusy,
+    setInfo,
+    setError,
+    reportError,
+    onProfileUpdated: handleProfileUpdated,
   });
 
   const composerController = useComposerController({
@@ -189,11 +229,15 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
     peerPopoverRef,
     roomModalCardRef,
     adminModalCardRef,
+    deviceModalCardRef,
+    profileModalCardRef,
     sidebarOpen: state.sidebarOpen,
     isMobileInputMode: state.isMobileInputMode,
     peerPanelOpen: state.peerPanelOpen,
     roomModalOpen: roomsController.roomModalOpen,
     adminModalOpen,
+    deviceModalOpen: devicesController.deviceModalOpen,
+    profileModalOpen: profileController.profileModalOpen,
     themeMode: state.themeMode,
     error,
     info,
@@ -217,6 +261,8 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
     setAdminModalOpen,
     setRoomModalOpen: roomsController.setRoomModalOpen,
     setPeerPanelOpen,
+    closeDeviceModal: devicesController.closeDeviceModal,
+    closeProfileModal: profileController.closeProfileModal,
     closeSidebar,
     setIsMobileInputMode: state.setIsMobileInputMode,
     setSidebarOpen,
@@ -244,13 +290,16 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
   return (
     <ChatRouteLayout
       authUser={auth.user}
+      authDevice={auth.device}
       managedUsersCount={managedUsers.length}
       busy={busy}
       roomsController={roomsController}
       messagesController={messagesController}
       sendQueueController={sendQueueController}
+      devicesController={devicesController}
       adminController={adminController}
       composerController={composerController}
+      profileController={profileController}
       viewModel={viewModel}
       ui={{
         sidebarOpen: state.sidebarOpen,
@@ -261,6 +310,8 @@ export function ChatRoutePage({ api, routeMode, roomIDFromRoute }: ChatRoutePage
         peerPopoverRef: state.peerPopoverRef,
         roomModalCardRef: state.roomModalCardRef,
         adminModalCardRef: state.adminModalCardRef,
+        deviceModalCardRef: state.deviceModalCardRef,
+        profileModalCardRef: state.profileModalCardRef,
         adminModalOpen,
         adminUserSearch,
         setAdminUserSearch,

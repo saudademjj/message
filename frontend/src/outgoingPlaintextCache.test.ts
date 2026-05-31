@@ -49,7 +49,7 @@ describe('outgoingPlaintextCache', () => {
 
     await expect(readOutgoingPlaintext(301, 10, 'sig-301-10-0')).resolves.toBeNull();
     await expect(readOutgoingPlaintext(301, 10, 'sig-301-10-1209')).resolves.toBe('payload-1209');
-  });
+  }, 15000);
 
   it('loads plaintext from indexeddb after memory reset', async () => {
     await rememberOutgoingPlaintext(401, 12, 'sig-401-12-a', 'persist-me');

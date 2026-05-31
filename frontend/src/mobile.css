@@ -216,6 +216,10 @@
         max-width: 85%;
     }
 
+    .bubble-row {
+        gap: 5px;
+    }
+
     .bubble-main {
         border-radius: 10px 10px 10px 3px;
         padding: 5px 8px;
@@ -234,6 +238,12 @@
 
     .bubble-sender-name {
         font-size: 0.7rem;
+    }
+
+    .bubble-meta-footer {
+        min-height: 12px;
+        gap: 3px;
+        font-size: 0.56rem;
     }
 
     .bubble-text {
@@ -338,7 +348,8 @@
         padding: 10px 14px;
     }
 
-    .peer-popover {
+    .peer-popover,
+    .peer-popover-floating {
         position: fixed;
         top: auto;
         bottom: 0;
@@ -346,6 +357,7 @@
         right: 0;
         width: 100%;
         max-width: none;
+        max-height: 75vh;
         border-radius: 24px 24px 0 0;
         border-bottom: none;
         padding: 24px 24px calc(24px + env(safe-area-inset-bottom));

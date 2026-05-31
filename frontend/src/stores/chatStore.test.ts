@@ -8,7 +8,7 @@ describe('chatStore', () => {
   it('updates state via setters and updater functions', () => {
     useChatStore.getState().setRooms([{ id: 1, name: 'alpha', createdAt: '2026-01-01T00:00:00Z' }]);
     useChatStore.getState().setSelectedRoomID(1);
-    useChatStore.getState().setSendQueue([{ id: 'q1', text: 'hello', status: 'queued', attempts: 0, lastError: null, createdAt: 1 }]);
+    useChatStore.getState().setSendQueue([{ id: 'q1', roomID: 1, text: 'hello', status: 'queued', attempts: 0, lastError: null, createdAt: 1 }]);
 
     useChatStore.getState().setSendQueue((previous) => previous.map((item) => ({ ...item, status: 'failed' })));
 

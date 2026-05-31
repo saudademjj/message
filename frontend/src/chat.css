@@ -147,6 +147,32 @@
     white-space: nowrap;
 }
 
+.unread-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 10px 0 8px;
+}
+
+.unread-divider::before,
+.unread-divider::after {
+    content: '';
+    flex: 0 1 96px;
+    height: 1px;
+    background: rgba(0, 168, 132, 0.24);
+}
+
+.unread-divider span {
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: rgba(0, 168, 132, 0.1);
+    color: #008069;
+    font-size: 0.68rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
 .message-system-event {
     display: flex;
     justify-content: center;
@@ -199,6 +225,13 @@
 .bubble-avatar-container {
     flex-shrink: 0;
     margin-bottom: 0;
+    /* Explicit, non-collapsing sizing so the peer avatar always shows on every
+       viewport width (desktop included), not only on mobile. */
+    display: flex;
+    align-items: flex-end;
+    align-self: flex-end;
+    width: 32px;
+    height: 32px;
 }
 
 .bubble-content-wrapper {
@@ -213,19 +246,24 @@
 }
 
 .bubble-sender-name {
+    /* Force the peer sender name to render at all widths; it must not be
+       clipped or collapsed on desktop. */
+    display: block;
     font-size: 0.68rem;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     margin-bottom: 2px;
     margin-left: 12px;
-    font-weight: 500;
+    font-weight: 600;
     letter-spacing: 0.02em;
-    opacity: 0.85;
+    opacity: 1;
+    overflow: visible;
+    white-space: nowrap;
 }
 
 .bubble-main {
     background: #ffffff;
     border-radius: 8px 8px 8px 2px;
-    padding: 5px 8px;
+    padding: 5px 8px 4px;
     border: 1px solid rgba(17, 27, 33, 0.09);
     box-shadow: none;
     position: relative;
@@ -367,15 +405,37 @@
 
 /* Bubble Row and Meta External */
 .bubble-row {
-    display: flex;
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: flex-end;
-    gap: 5px;
+    gap: 8px;
     max-width: 100%;
 }
 
-.bubble.own .bubble-row {
-    justify-content: flex-end;
+.bubble-row.own {
+    grid-template-columns: auto minmax(0, 1fr);
+}
+
+.bubble-row.peer {
+    grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.bubble-row.own .bubble-main {
+    grid-column: 2;
+}
+
+.bubble-row.own .bubble-meta-footer {
+    grid-column: 1;
+    grid-row: 1;
+}
+
+.bubble-row.peer .bubble-main {
+    grid-column: 1;
+}
+
+.bubble-row.peer .bubble-meta-footer {
+    grid-column: 2;
+    grid-row: 1;
 }
 
 .bubble-meta-external {
@@ -397,6 +457,7 @@
     justify-content: flex-start;
 }
 
+.bubble-meta-footer time,
 .bubble-meta-external time {
     font-family: 'Space Mono', monospace;
     font-size: 0.58rem;
@@ -439,7 +500,8 @@ mark.search-highlight {
 }
 
 .delivery-chip {
-    font-size: 0.58rem;
+    width: 18px;
+    height: 12px;
     padding: 0;
     border-radius: 0;
     background: transparent;
@@ -450,6 +512,43 @@ mark.search-highlight {
     cursor: default;
     display: inline-flex;
     align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+}
+
+.delivery-checks {
+    position: relative;
+    display: inline-block;
+    width: 17px;
+    height: 12px;
+}
+
+.delivery-checks span {
+    position: absolute;
+    width: 8px;
+    height: 4px;
+    border-left: 1.7px solid currentColor;
+    border-bottom: 1.7px solid currentColor;
+    transform: rotate(-45deg);
+    transform-origin: left bottom;
+}
+
+.delivery-checks span:first-child {
+    left: 2px;
+    top: 3px;
+}
+
+.delivery-checks span:last-child {
+    left: 7px;
+    top: 3px;
+}
+
+.delivery-chip.sent .delivery-checks span:first-child {
+    left: 5px;
+}
+
+.delivery-chip.sent .delivery-checks span:last-child {
+    display: none;
 }
 
 .delivery-chip .read-by-tooltip {
@@ -489,9 +588,37 @@ mark.search-highlight {
     border-color: var(--bg-inverse, #111827) transparent transparent transparent;
 }
 
-.delivery-chip.delivered {
+.delivery-chip.partial {
+    color: #667781;
+}
+
+.delivery-chip.read {
     background: transparent;
     color: #53bdeb;
+}
+
+.bubble-meta-footer {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    align-self: end;
+    min-height: 13px;
+    margin: 0 0 1px;
+    white-space: nowrap;
+    line-height: 1;
+}
+
+.bubble-meta-footer.own {
+    justify-self: end;
+}
+
+.bubble-meta-footer.peer {
+    justify-self: start;
+    justify-content: flex-start;
+}
+
+.delivery-chip.peer-status {
+    cursor: default;
 }
 
 .bubble-body {
@@ -663,8 +790,12 @@ mark.search-highlight {
 }
 
 .bubble.emoji-only .delivery-chip {
-    background: var(--bg-elevated);
+    background: transparent;
     color: var(--text-tertiary);
+}
+
+.bubble.emoji-only .bubble-meta-footer {
+    margin: 0;
 }
 
 .bubble.emoji-only .bubble-meta-footer time {
@@ -1255,13 +1386,24 @@ mark.search-highlight {
 }
 
 :root[data-theme='dark'] .bubble-meta-external time,
+:root[data-theme='dark'] .bubble-meta-footer time,
 :root[data-theme='dark'] .edited-chip,
 :root[data-theme='dark'] .delivery-chip {
     color: #8696a0;
 }
 
-:root[data-theme='dark'] .delivery-chip.delivered {
+:root[data-theme='dark'] .delivery-chip.read {
     color: #53bdeb;
+}
+
+:root[data-theme='dark'] .unread-divider::before,
+:root[data-theme='dark'] .unread-divider::after {
+    background: rgba(37, 211, 102, 0.22);
+}
+
+:root[data-theme='dark'] .unread-divider span {
+    background: rgba(37, 211, 102, 0.14);
+    color: #92f3b9;
 }
 
 :root[data-theme='dark'] .quote-preview-external {
@@ -1404,6 +1546,25 @@ mark.search-highlight {
     background: rgba(35, 49, 56, 1);
 }
 
+:root[data-theme='dark'] .status-actions .status-pill.neutral {
+    background: rgba(35, 49, 56, 0.88);
+    border-color: rgba(134, 150, 160, 0.32);
+    color: #d1d7db;
+    box-shadow: inset 0 1px 0 rgba(233, 237, 239, 0.06);
+}
+
+:root[data-theme='dark'] .status-actions .status-pill.neutral:hover {
+    background: rgba(42, 57, 66, 0.96);
+    border-color: rgba(134, 150, 160, 0.48);
+    color: #e9edef;
+}
+
+:root[data-theme='dark'] .peer-pill.open {
+    background: rgba(37, 211, 102, 0.16);
+    border-color: rgba(37, 211, 102, 0.38);
+    color: #92f3b9;
+}
+
 :root[data-theme='dark'] .toast.error {
     border-left-color: rgba(239, 68, 68, 0.6);
     color: #fca5a5;
@@ -1505,13 +1666,24 @@ mark.search-highlight {
     }
 
     :root:not([data-theme='light']) .bubble-meta-external time,
+    :root:not([data-theme='light']) .bubble-meta-footer time,
     :root:not([data-theme='light']) .edited-chip,
     :root:not([data-theme='light']) .delivery-chip {
         color: #8696a0;
     }
 
-    :root:not([data-theme='light']) .delivery-chip.delivered {
+    :root:not([data-theme='light']) .delivery-chip.read {
         color: #53bdeb;
+    }
+
+    :root:not([data-theme='light']) .unread-divider::before,
+    :root:not([data-theme='light']) .unread-divider::after {
+        background: rgba(37, 211, 102, 0.22);
+    }
+
+    :root:not([data-theme='light']) .unread-divider span {
+        background: rgba(37, 211, 102, 0.14);
+        color: #92f3b9;
     }
 
     :root:not([data-theme='light']) .quote-preview-external {
@@ -1654,6 +1826,25 @@ mark.search-highlight {
         background: rgba(35, 49, 56, 1);
     }
 
+    :root:not([data-theme='light']) .status-actions .status-pill.neutral {
+        background: rgba(35, 49, 56, 0.88);
+        border-color: rgba(134, 150, 160, 0.32);
+        color: #d1d7db;
+        box-shadow: inset 0 1px 0 rgba(233, 237, 239, 0.06);
+    }
+
+    :root:not([data-theme='light']) .status-actions .status-pill.neutral:hover {
+        background: rgba(42, 57, 66, 0.96);
+        border-color: rgba(134, 150, 160, 0.48);
+        color: #e9edef;
+    }
+
+    :root:not([data-theme='light']) .peer-pill.open {
+        background: rgba(37, 211, 102, 0.16);
+        border-color: rgba(37, 211, 102, 0.38);
+        color: #92f3b9;
+    }
+
     :root:not([data-theme='light']) .toast.error {
         border-left-color: rgba(239, 68, 68, 0.6);
         color: #fca5a5;
@@ -1727,6 +1918,14 @@ mark.search-highlight {
     max-width: 340px;
     animation: popover-enter 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
     transform-origin: top right;
+}
+
+.peer-popover-floating {
+    position: fixed;
+    top: 0;
+    right: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 @keyframes popover-enter {

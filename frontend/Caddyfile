@@ -1,15 +1,15 @@
 {
     admin off
     auto_https disable_redirects
-    default_sni {$CHAT_SITE_SNI:47.100.248.114}
+    default_sni {$CHAT_SITE_SNI:chat.example.com}
 }
 
-{$CHAT_SITE_ADDR:https://47.100.248.114:8443} {
+{$CHAT_SITE_ADDR:https://chat.example.com:8443} {
     tls {$CHAT_TLS_CERT:/opt/e2ee-chat/certs/fullchain.crt} {$CHAT_TLS_KEY:/opt/e2ee-chat/certs/private.key}
     encode gzip
 
     @api path /api/*
-    @ws path /ws
+    @ws path /ws /ws/*
 
     handle @api {
         reverse_proxy 127.0.0.1:8081

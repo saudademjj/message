@@ -395,12 +395,12 @@ export const ChatComposer = memo(function ChatComposer({
             ) : null}
             <button
               className="primary-btn send-btn"
-              disabled={!isRoomSelected || !draft.trim() || !wsConnected || !cryptoReady}
+              disabled={!isRoomSelected || !draft.trim() || !cryptoReady}
               title={
                 !isRoomSelected ? '未选择房间' :
-                  !wsConnected ? 'WebSocket 未连接' :
-                    !cryptoReady ? '加密初始化中' :
-                      !draft.trim() ? '请输入内容' :
+                  !cryptoReady ? '加密初始化中' :
+                    !draft.trim() ? '请输入内容' :
+                      !wsConnected ? '当前离线，点击后会暂存到发送队列' :
                         ''
               }
               type="submit"

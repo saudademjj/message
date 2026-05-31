@@ -21,10 +21,30 @@ export type AuthSession = {
   };
 };
 
+export function isAuthSession(value: unknown): value is AuthSession {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const candidate = value as Partial<AuthSession>;
+  return Boolean(
+    candidate.user
+    && typeof candidate.user.id === 'number'
+    && typeof candidate.user.username === 'string'
+    && (candidate.user.role === 'admin' || candidate.user.role === 'user')
+    && candidate.device
+    && typeof candidate.device.deviceId === 'string'
+    && typeof candidate.device.deviceName === 'string'
+    && typeof candidate.device.sessionVersion === 'number'
+    && typeof candidate.device.lastSeenAt === 'string',
+  );
+}
+
 type AuthContextValue = {
   auth: AuthSession | null;
   login: (username: string, password: string) => Promise<AuthSession>;
   logout: () => void;
+  refreshSession: () => Promise<void>;
+  updateAuthUser: (user: User) => void;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -43,7 +63,7 @@ export function AuthProvider({ api, children }: AuthProviderProps) {
     api.session({ signal: controller.signal })
       .then((session) => {
         if (!cancelled) {
-          setAuth(session);
+          setAuth(isAuthSession(session) ? session : null);
         }
       })
       .catch((reason: unknown) => {
@@ -60,6 +80,9 @@ export function AuthProvider({ api, children }: AuthProviderProps) {
 
   const login = useCallback(async (username: string, password: string): Promise<AuthSession> => {
     const session = await api.login(username.trim(), password);
+    if (!isAuthSession(session)) {
+      throw new Error('登录响应格式异常');
+    }
     setAuth(session);
     return session;
   }, [api]);
@@ -71,11 +94,29 @@ export function AuthProvider({ api, children }: AuthProviderProps) {
     setAuth(null);
   }, [api]);
 
+  const refreshSession = useCallback(async (): Promise<void> => {
+    try {
+      const session = await api.session();
+      setAuth(isAuthSession(session) ? session : null);
+    } catch (reason: unknown) {
+      if (isApiAbortError(reason)) {
+        return;
+      }
+      // Leave the existing auth state untouched on transient failures.
+    }
+  }, [api]);
+
+  const updateAuthUser = useCallback((user: User) => {
+    setAuth((previous) => (previous ? { ...previous, user } : previous));
+  }, []);
+
   const value = useMemo<AuthContextValue>(() => ({
     auth,
     login,
     logout,
-  }), [auth, login, logout]);
+    refreshSession,
+    updateAuthUser,
+  }), [auth, login, logout, refreshSession, updateAuthUser]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

@@ -300,6 +300,35 @@ export function toSignalPreKeyBundleUpload(identity: Identity): SignalPreKeyBund
   };
 }
 
+export async function replenishOneTimePreKeysIfNeeded(
+  userID: number,
+  deviceID: string,
+  minAvailable = Math.max(8, Math.floor(ONE_TIME_PREKEY_TARGET / 4)),
+): Promise<{ identity: Identity; replenished: boolean }> {
+  requireCryptoSupport();
+  const safeDeviceID = deviceID.trim();
+  const { record } = await ensureIdentityRecord(
+    userID,
+    safeDeviceID || null,
+    DEFAULT_KEY_MAX_AGE_MS,
+    toSignedPreKeyHistoryLimit(DEFAULT_KEY_HISTORY_LIMIT),
+    ONE_TIME_PREKEY_TARGET,
+  );
+  if (record.oneTimePreKeys.length >= minAvailable) {
+    return { identity: toIdentity(record), replenished: false };
+  }
+  const missing = ONE_TIME_PREKEY_TARGET - record.oneTimePreKeys.length;
+  const additions = await createOneTimePreKeys(record.nextOneTimePreKeyID, missing);
+  const nextRecord: PersistedIdentityRecord = {
+    ...record,
+    oneTimePreKeys: [...record.oneTimePreKeys, ...additions],
+    nextOneTimePreKeyID: record.nextOneTimePreKeyID + additions.length,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeIdentityRecord(nextRecord);
+  return { identity: toIdentity(nextRecord), replenished: true };
+}
+
 export function findSignedPreKey(identity: Identity, keyID: number): PersistedSignedPreKey | null {
   return identity.signedPreKeys.find((entry) => entry.keyID === keyID) ?? null;
 }

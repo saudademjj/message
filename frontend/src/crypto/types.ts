@@ -109,12 +109,18 @@ export type SignalPreKeyBundle = {
     createdAt?: string;
   };
   updatedAt?: string;
+  oneTimePreKeyConsumed?: boolean;
+  oneTimePreKeyLow?: boolean;
+  oneTimePreKeysLeft?: number;
 };
 
 export type SignalPreKeyBundleList = {
   userId: number;
   username?: string;
   devices: SignalPreKeyBundle[];
+  activeDeviceCount: number;
+  readyDeviceCount: number;
+  missingDeviceCount: number;
   updatedAt?: string;
 };
 

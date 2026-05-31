@@ -1,17 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   ensureRatchetSessionsForRecipients,
-  encryptForRecipients,
+  encryptForRecipientsWithContentKey,
   type Identity,
 } from '../crypto';
 import { buildRecipientAddress } from '../crypto/utils';
-import type { SendQueueItem } from '../app/appTypes';
+import type { SendQueueItem, UIMessage } from '../app/appTypes';
 import { formatError } from '../app/helpers';
 import { useChatStore } from '../stores/chatStore';
 import type { Peer, User } from '../types';
 import { rememberOutgoingPlaintext } from '../outgoingPlaintextCache';
+import { estimatePendingWidth } from '../app/helpers';
+import { persistOutgoingContentKey } from '../secureMessageStore';
 
 type ValueOrUpdater<T> = T | ((previous: T) => T);
+
+// Cap automatic re-queueing of failed sends. Identity rotates periodically, so
+// without a cap a permanently failing item would silently churn forever. Items
+// at/over the cap stay 'failed' and remain manually retryable.
+export const MAX_SEND_ATTEMPTS = 5;
 
 type UseSendQueueArgs = {
   authUserID: number | null;
@@ -46,12 +53,19 @@ type UseSendQueueArgs = {
         createdAt?: string;
       };
       updatedAt?: string;
+      oneTimePreKeyConsumed?: boolean;
+      oneTimePreKeyLow?: boolean;
+      oneTimePreKeysLeft?: number;
     }>;
+    activeDeviceCount: number;
+    readyDeviceCount: number;
+    missingDeviceCount: number;
     updatedAt?: string;
   }>;
   reportError: (reason: unknown, fallback: string) => void;
   setError: (value: string) => void;
   setInfo: (value: string) => void;
+  authUsername: string;
 };
 
 type UseSendQueueResult = {
@@ -61,7 +75,7 @@ type UseSendQueueResult = {
   pendingQueueCount: number;
   replaceQueue: (nextQueue: SendQueueItem[]) => void;
   queueText: (text: string) => SendQueueItem;
-  clearQueue: () => void;
+  clearQueue: (roomID?: number) => void;
   flushSendQueue: () => Promise<void>;
   retryQueueItem: (itemID: string) => void;
   discardQueueItem: (itemID: string) => void;
@@ -73,6 +87,31 @@ function createQueueItemID(): string {
     return crypto.randomUUID();
   }
   return `q-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+export function filterQueueForRoom(sendQueue: SendQueueItem[], roomID: number | null): SendQueueItem[] {
+  if (!roomID || roomID <= 0) {
+    return [];
+  }
+  return sendQueue.filter((item) => item.roomID === roomID);
+}
+
+export function selectAutoRetryableFailedItems(sendQueue: SendQueueItem[]): SendQueueItem[] {
+  return sendQueue.filter(
+    (item) => item.status === 'failed' && item.attempts < MAX_SEND_ATTEMPTS,
+  );
+}
+
+export function pendingRecipientCoverageError(pendingUserIDs: number[]): string | null {
+  const deduped = [...new Set(
+    pendingUserIDs
+      .map((value) => Math.floor(value))
+      .filter((value) => Number.isFinite(value) && value > 0),
+  )].sort((left, right) => left - right);
+  if (deduped.length === 0) {
+    return null;
+  }
+  return `以下成员存在尚未完成安全初始化的活跃设备: ${deduped.join(',')}`;
 }
 
 export function useSendQueue({
@@ -91,8 +130,10 @@ export function useSendQueue({
   reportError,
   setError,
   setInfo,
+  authUsername,
 }: UseSendQueueArgs): UseSendQueueResult {
   const sendQueue = useChatStore((state) => state.sendQueue);
+  const setLocalDraftMessages = useChatStore((state) => state.setLocalDraftMessages);
   const setSendQueue = useChatStore((state) => state.setSendQueue);
 
   const sendQueueRef = useRef<SendQueueItem[]>([]);
@@ -107,13 +148,78 @@ export function useSendQueue({
     setSendQueue(nextQueue);
   }, [setSendQueue]);
 
-  const clearQueue = useCallback(() => {
-    replaceQueue([]);
-  }, [replaceQueue]);
+  const clearQueue = useCallback((roomID?: number) => {
+    if (!roomID || roomID <= 0) {
+      replaceQueue([]);
+      setLocalDraftMessages([]);
+      return;
+    }
+    replaceQueue(sendQueueRef.current.filter((item) => item.roomID !== roomID));
+    setLocalDraftMessages((previous) => previous.filter((message) => message.roomId !== roomID));
+  }, [replaceQueue, setLocalDraftMessages]);
+
+  const buildLocalDraftMessage = useCallback((
+    queueItemID: string,
+    text: string,
+    next: Partial<UIMessage> = {},
+  ): UIMessage => {
+    const now = new Date().toISOString();
+    return {
+      id: -Date.now(),
+      roomId: selectedRoomID ?? 0,
+      senderId: authUserID ?? 0,
+      senderUsername: authUsername,
+      createdAt: now,
+      editedAt: null,
+      revokedAt: null,
+      payload: {
+        version: 3,
+        ciphertext: '',
+        messageIv: '',
+        wrappedKeys: {},
+        senderPublicKeyJwk: (identity?.publicKeyJwk ?? {}) as JsonWebKey,
+        senderSigningPublicKeyJwk: (identity?.signingPublicKeyJwk ?? {}) as JsonWebKey,
+        contentType: 'text/plain',
+        senderDeviceId: authDeviceID ?? '',
+        encryptionScheme: 'DOUBLE_RATCHET_V1',
+      },
+      plaintext: text,
+      decryptState: 'ok',
+      pendingWidthPx: estimatePendingWidth(text),
+      localQueueID: queueItemID,
+      localStatus: 'queued',
+      localSignature: queueItemID,
+      ...next,
+    };
+  }, [authDeviceID, authUserID, authUsername, identity?.publicKeyJwk, identity?.signingPublicKeyJwk, selectedRoomID]);
+
+  const appendLocalDraftMessage = useCallback((queueItemID: string, text: string) => {
+    const draft = buildLocalDraftMessage(queueItemID, text);
+    setLocalDraftMessages((previous) => {
+      const filtered = previous.filter((message) => message.localQueueID !== queueItemID);
+      return [...filtered, draft];
+    });
+  }, [buildLocalDraftMessage, setLocalDraftMessages]);
+
+  const updateLocalMessage = useCallback((queueItemID: string, next: Partial<UIMessage>) => {
+    setLocalDraftMessages((previous) =>
+      previous.map((message) =>
+        message.localQueueID === queueItemID
+          ? { ...message, ...next }
+          : message,
+      ));
+  }, [setLocalDraftMessages]);
+
+  const removeLocalMessage = useCallback((queueItemID: string) => {
+    setLocalDraftMessages((previous) =>
+      previous.filter((message) => message.localQueueID !== queueItemID),
+    );
+  }, [setLocalDraftMessages]);
 
   const queueText = useCallback((text: string): SendQueueItem => {
     const queueItem: SendQueueItem = {
       id: createQueueItemID(),
+      roomID: selectedRoomID ?? 0,
       text,
       status: 'queued',
       attempts: 0,
@@ -121,8 +227,9 @@ export function useSendQueue({
       createdAt: Date.now(),
     };
     replaceQueue([...sendQueueRef.current, queueItem]);
+    appendLocalDraftMessage(queueItem.id, text);
     return queueItem;
-  }, [replaceQueue]);
+  }, [appendLocalDraftMessage, replaceQueue, selectedRoomID]);
 
   const flushSendQueue = useCallback(async () => {
     if (queueBusyRef.current) {
@@ -137,7 +244,7 @@ export function useSendQueue({
     if (!wsConnected) {
       return;
     }
-    if (sendQueueRef.current.length === 0) {
+    if (filterQueueForRoom(sendQueueRef.current, selectedRoomID).length === 0) {
       return;
     }
 
@@ -145,11 +252,15 @@ export function useSendQueue({
     const safetyTimer = window.setTimeout(() => {
       queueBusyRef.current = false;
     }, 30000);
-    const queuedAtStart = sendQueueRef.current.filter((item) => item.status !== 'failed').length;
+    const queuedAtStart = sendQueueRef.current.filter(
+      (item) => item.roomID === selectedRoomID && item.status !== 'failed',
+    ).length;
 
     try {
       while (true) {
-        const target = sendQueueRef.current.find((item) => item.status === 'queued');
+        const target = sendQueueRef.current.find(
+          (item) => item.roomID === selectedRoomID && item.status === 'queued',
+        );
         if (!target) {
           break;
         }
@@ -185,13 +296,15 @@ export function useSendQueue({
           recipientUserIDs,
           resolveSignalBundle,
         );
-        const pendingPeerIDs = sessionStatus.pendingUserIDs;
-        if (pendingPeerIDs.length > 0) {
-          const deduped = [...new Set(pendingPeerIDs)].sort((left, right) => left - right);
-          throw new Error(`以下成员密钥会话未就绪: ${deduped.join(',')}`);
+        const pendingCoverageError = pendingRecipientCoverageError(sessionStatus.pendingUserIDs);
+        if (pendingCoverageError) {
+          throw new Error(pendingCoverageError);
+        }
+        if (sessionStatus.readyRecipients.length === 0) {
+          throw new Error('没有可用的加密接收设备，已停止发送');
         }
 
-        const payload = await encryptForRecipients(
+        const { payload, rawContentKey } = await encryptForRecipientsWithContentKey(
           target.text,
           authUserID,
           authDeviceID,
@@ -200,6 +313,7 @@ export function useSendQueue({
         );
         if (payload.signature) {
           await rememberOutgoingPlaintext(authUserID, selectedRoomID, payload.signature, target.text);
+          void persistOutgoingContentKey(authUserID, selectedRoomID, payload.signature, rawContentKey);
         }
         const missingRecipients = sessionStatus.readyRecipients
           .map((recipient) => buildRecipientAddress(recipient.userID, recipient.deviceID))
@@ -216,14 +330,23 @@ export function useSendQueue({
           throw new Error('WebSocket 未连接');
         }
 
+        updateLocalMessage(target.id, {
+          localStatus: 'sending',
+          localSignature: payload.signature,
+        });
         replaceQueue(sendQueueRef.current.filter((item) => item.id !== target.id));
       }
 
-      if (sendQueueRef.current.length === 0 && queuedAtStart > 1) {
+      if (
+        filterQueueForRoom(sendQueueRef.current, selectedRoomID).length === 0
+        && queuedAtStart > 1
+      ) {
         setInfo(`已发送 ${queuedAtStart} 条排队消息`);
       }
     } catch (reason: unknown) {
-      const sending = sendQueueRef.current.find((item) => item.status === 'sending');
+      const sending = sendQueueRef.current.find(
+        (item) => item.roomID === selectedRoomID && item.status === 'sending',
+      );
       if (!sending) {
         reportError(reason, '加密或发送失败');
       } else {
@@ -240,6 +363,7 @@ export function useSendQueue({
               : item,
           ),
         );
+        updateLocalMessage(sending.id, { localStatus: 'failed' });
         setError(message);
       }
     } finally {
@@ -260,72 +384,88 @@ export function useSendQueue({
     setError,
     setInfo,
     setRoomMembers,
+    updateLocalMessage,
     wsConnected,
   ]);
 
   const retryQueueItem = useCallback((itemID: string) => {
+    updateLocalMessage(itemID, { localStatus: 'queued' });
     replaceQueue(
       sendQueueRef.current.map((item) =>
         item.id === itemID
-          ? { ...item, status: 'queued', lastError: null }
+          ? { ...item, status: 'queued', attempts: 0, lastError: null }
           : item,
       ),
     );
     void flushSendQueue();
-  }, [flushSendQueue, replaceQueue]);
+  }, [flushSendQueue, replaceQueue, updateLocalMessage]);
 
   const discardQueueItem = useCallback((itemID: string) => {
+    removeLocalMessage(itemID);
     replaceQueue(sendQueueRef.current.filter((item) => item.id !== itemID));
-  }, [replaceQueue]);
+  }, [removeLocalMessage, replaceQueue]);
 
   const retryAllFailedItems = useCallback(() => {
+    for (const item of sendQueueRef.current) {
+      if (item.roomID === selectedRoomID && item.status === 'failed') {
+        updateLocalMessage(item.id, { localStatus: 'queued' });
+      }
+    }
     replaceQueue(
       sendQueueRef.current.map((item) =>
-        item.status === 'failed'
-          ? { ...item, status: 'queued', lastError: null }
+        item.roomID === selectedRoomID && item.status === 'failed'
+          ? { ...item, status: 'queued', attempts: 0, lastError: null }
           : item,
       ),
     );
     void flushSendQueue();
-  }, [flushSendQueue, replaceQueue]);
+  }, [flushSendQueue, replaceQueue, selectedRoomID, updateLocalMessage]);
 
   useEffect(() => {
-    if (!sendQueue.some((item) => item.status === 'queued') || !wsConnected) {
+    if (!sendQueue.some((item) => item.roomID === selectedRoomID && item.status === 'queued') || !wsConnected) {
       return;
     }
     void flushSendQueue();
-  }, [flushSendQueue, handshakeTick, peers, sendQueue, wsConnected]);
+  }, [flushSendQueue, handshakeTick, peers, selectedRoomID, sendQueue, wsConnected]);
 
   useEffect(() => {
     if (!identity || !identityBound || !wsConnected) {
       return;
     }
-    const pending = sendQueueRef.current.filter((item) => item.status === 'failed');
+    // Only auto-re-queue failures that have not exhausted their retry budget,
+    // and preserve lastError so the user still sees why the send failed. Items
+    // at/over the cap stay 'failed' and can only be retried manually.
+    const pending = selectAutoRetryableFailedItems(sendQueueRef.current);
     if (pending.length === 0) {
       return;
     }
     replaceQueue(
       sendQueueRef.current.map((item) =>
         pending.some((target) => target.id === item.id)
-          ? { ...item, status: 'queued', lastError: null }
+          ? { ...item, status: 'queued' }
           : item,
       ),
     );
   }, [identity, identityBound, replaceQueue, wsConnected]);
 
+  const selectedRoomQueue = useMemo(
+    () => filterQueueForRoom(sendQueue, selectedRoomID),
+    [selectedRoomID, sendQueue],
+  );
+
   const failedQueueItems = useMemo(
-    () => sendQueue.filter((item) => item.status === 'failed'),
-    [sendQueue],
+    () => selectedRoomQueue.filter((item) => item.status === 'failed'),
+    [selectedRoomQueue],
   );
 
   const failedQueueCount = failedQueueItems.length;
   const pendingQueueCount = useMemo(
-    () => sendQueue.filter((item) => item.status !== 'failed').length,
-    [sendQueue],
+    () => selectedRoomQueue.filter((item) => item.status !== 'failed').length,
+    [selectedRoomQueue],
   );
 
   return {
-    sendQueue,
+    sendQueue: selectedRoomQueue,
     failedQueueItems,
     failedQueueCount,
     pendingQueueCount,

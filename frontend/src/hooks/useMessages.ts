@@ -9,11 +9,12 @@ import {
   type SetStateAction,
 } from 'react';
 import {
-  decryptPayload,
+  decryptPayloadWithContentKey,
   ensureRatchetSessionsForRecipients,
   encryptForRecipients,
   resetRatchetSession,
   signDecryptAck,
+  wrapContentKeyForRecipient,
   type Identity,
 } from '../crypto';
 import { buildRecipientAddress } from '../crypto/utils';
@@ -29,8 +30,9 @@ import {
 } from '../app/helpers';
 import { useTimelineItems } from './useTimelineItems';
 import { useChatStore } from '../stores/chatStore';
-import { loadCachedPlaintexts, persistDecryptedPlaintext } from '../secureMessageStore';
+import { loadCachedContentKeys, loadCachedPlaintexts, loadOutgoingContentKey, persistDecryptedPlaintext } from '../secureMessageStore';
 import { markOutgoingPlaintextDelivered, readOutgoingPlaintext } from '../outgoingPlaintextCache';
+import { isExpectedReadUser } from '../readState';
 import {
   clearResyncRequest,
   rememberResyncRequest,
@@ -38,9 +40,9 @@ import {
 } from '../resyncRecoveryStore';
 import type {
   ChatMessage,
-  DecryptAckFrame,
   DecryptRecoveryPayloadFrame,
   DecryptRecoveryRequestFrame,
+  EnvelopeRefillRequestFrame,
   MessageUpdateFrame,
   Peer,
   ProtocolErrorFrame,
@@ -48,6 +50,7 @@ import type {
   Room,
   TypingStatusFrame,
   User,
+  UserBundleChangedFrame,
 } from '../types';
 
 const MESSAGE_PAGE_SIZE = 100;
@@ -96,6 +99,9 @@ type UseMessagesArgs = {
       };
       updatedAt?: string;
     }>;
+    activeDeviceCount: number;
+    readyDeviceCount: number;
+    missingDeviceCount: number;
     updatedAt?: string;
   }>;
   reportError: (reason: unknown, fallback: string) => void;
@@ -114,7 +120,7 @@ type UseMessagesResult = {
   peers: Record<string, Peer>;
   onlinePeers: Peer[];
   peerCount: number;
-  peerSafetyNumbers: Record<number, string>;
+  peerSafetyNumbers: Record<string, string>;
   typingIndicatorText: string;
   roomSearchQuery: string;
   setRoomSearchQuery: Dispatch<SetStateAction<string>>;
@@ -124,6 +130,7 @@ type UseMessagesResult = {
   messageListRef: React.RefObject<HTMLDivElement | null>;
   messageEndRef: React.RefObject<HTMLDivElement | null>;
   focusMessageID: number | null;
+  lastReadMessageID: number;
   unreadIncomingCount: number;
   timelineItems: ReturnType<typeof useTimelineItems<UIMessage>>;
   emitTypingStatus: (isTyping: boolean) => void;
@@ -139,6 +146,95 @@ type UseMessagesResult = {
   resetReplyAndFocusState: () => void;
   setFocusMessageID: Dispatch<SetStateAction<number | null>>;
 };
+
+export function findFirstUnreadIncomingMessageID(
+  messages: Array<Pick<ChatMessage, 'id' | 'senderId'>>,
+  authUserID: number,
+  lastReadMessageID: number,
+): number | null {
+  const firstUnread = messages.find(
+    (message) =>
+      message.id > lastReadMessageID
+      && message.senderId !== authUserID,
+  );
+  return firstUnread?.id ?? null;
+}
+
+export function compareMessagesForTimeline(left: UIMessage, right: UIMessage): number {
+  const leftIsLocal = Boolean(left.localQueueID);
+  const rightIsLocal = Boolean(right.localQueueID);
+  if (leftIsLocal !== rightIsLocal) {
+    return leftIsLocal ? 1 : -1;
+  }
+
+  const leftTime = Date.parse(left.createdAt);
+  const rightTime = Date.parse(right.createdAt);
+  const leftSortTime = Number.isNaN(leftTime) ? 0 : leftTime;
+  const rightSortTime = Number.isNaN(rightTime) ? 0 : rightTime;
+  if (leftSortTime !== rightSortTime) {
+    return leftSortTime - rightSortTime;
+  }
+
+  return left.id - right.id;
+}
+
+export function findLatestServerMessageID(messages: UIMessage[]): number | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message.localQueueID && message.id > 0) {
+      return message.id;
+    }
+  }
+  return null;
+}
+
+export function mergeMessagesByID(
+  previous: UIMessage[],
+  incoming: UIMessage[],
+): UIMessage[] {
+  if (incoming.length === 0) {
+    return previous;
+  }
+  const merged = new Map<number, UIMessage>();
+  for (const message of previous) {
+    merged.set(message.id, message);
+  }
+  for (const message of incoming) {
+    const current = merged.get(message.id);
+    if (current?.decryptState === 'ok' && message.decryptState !== 'ok') {
+      continue;
+    }
+    merged.set(message.id, message);
+  }
+  return [...merged.values()].sort(compareMessagesForTimeline);
+}
+
+export async function fetchMissingMessagesAfterCursor(
+  fetchPage: (afterMessageID: number | null) => Promise<{ messages: ChatMessage[] }>,
+  afterMessageID: number | null,
+  pageSize: number,
+): Promise<ChatMessage[]> {
+  const normalizedPageSize = Math.max(1, Math.floor(pageSize));
+  const collected: ChatMessage[] = [];
+  let cursor = afterMessageID && afterMessageID > 0 ? afterMessageID : null;
+
+  while (true) {
+    const { messages: pageMessages } = await fetchPage(cursor);
+    if (pageMessages.length === 0) {
+      return collected;
+    }
+    const sorted = [...pageMessages].sort((left, right) => left.id - right.id);
+    collected.push(...sorted);
+    if (sorted.length < normalizedPageSize) {
+      return collected;
+    }
+    const nextCursor = sorted[sorted.length - 1]?.id ?? 0;
+    if (nextCursor <= (cursor ?? 0)) {
+      return collected;
+    }
+    cursor = nextCursor;
+  }
+}
 
 export function useMessages({
   api,
@@ -162,10 +258,15 @@ export function useMessages({
   onRoomSwitch,
   subscribeOpen,
 }: UseMessagesArgs): UseMessagesResult {
-  const messages = useChatStore((state) => state.messages);
+  const storedMessages = useChatStore((state) => state.messages);
+  const localDraftMessages = useChatStore((state) => state.localDraftMessages);
   const setMessages = useChatStore((state) => state.setMessages);
+  const setLocalDraftMessages = useChatStore((state) => state.setLocalDraftMessages);
   const messageReadReceipts = useChatStore((state) => state.messageReadReceipts);
   const setMessageReadReceipts = useChatStore((state) => state.setMessageReadReceipts);
+  const setRoomMembers = useChatStore((state) => state.setRoomMembers);
+  const setRooms = useChatStore((state) => state.setRooms);
+  const setLocalReadCursor = useChatStore((state) => state.setLocalReadCursor);
   const peers = useChatStore((state) => state.peers);
   const setPeers = useChatStore((state) => state.setPeers);
 
@@ -177,7 +278,9 @@ export function useMessages({
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
   const [focusMessageID, setFocusMessageID] = useState<number | null>(null);
   const [unreadIncomingCount, setUnreadIncomingCount] = useState(0);
-  const [peerSafetyNumbers, setPeerSafetyNumbers] = useState<Record<number, string>>({});
+  const [peerSafetyNumbers, setPeerSafetyNumbers] = useState<Record<string, string>>({});
+  const [firstUnreadMessageID, setFirstUnreadMessageID] = useState<number | null>(null);
+  const [lastReadMessageID, setLastReadMessageID] = useState(0);
 
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
@@ -210,6 +313,13 @@ export function useMessages({
     && identity.userID === auth.user.id
     && identity.activeKeyID === auth.device.deviceId,
   );
+
+  const messages = useMemo(() => {
+    const activeDrafts = selectedRoomID
+      ? localDraftMessages.filter((message) => message.roomId === selectedRoomID)
+      : [];
+    return [...storedMessages, ...activeDrafts].sort(compareMessagesForTimeline);
+  }, [localDraftMessages, selectedRoomID, storedMessages]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -338,28 +448,29 @@ export function useMessages({
       setPeerSafetyNumbers({});
       return;
     }
-    const peerIDs = [...new Set(Object.values(peers)
-      .map((peer) => peer.userId)
-      .filter((peerID) => peerID > 0 && peerID !== auth.user.id))];
-    if (peerIDs.length === 0) {
+    const peerTargets = Object.values(peers)
+      .filter((peer) => peer.userId > 0 && peer.userId !== auth.user.id && peer.deviceId.trim());
+    if (peerTargets.length === 0) {
       setPeerSafetyNumbers({});
       return;
     }
     let cancelled = false;
     Promise.allSettled(
-      peerIDs.map(async (peerID) => {
-        const snapshot = await api.fetchSignalSafetyNumber(peerID);
-        return [peerID, snapshot.safetyNumber] as const;
+      peerTargets.map(async (peer) => {
+        const snapshot = await api.fetchSignalSafetyNumber(peer.userId, peer.deviceId);
+        const deviceSafetyNumber = snapshot.devices?.find((device) => device.deviceId === peer.deviceId)?.safetyNumber
+          ?? snapshot.safetyNumber;
+        return [buildRecipientAddress(peer.userId, peer.deviceId), deviceSafetyNumber] as const;
       }),
     ).then((results) => {
       if (cancelled) {
         return;
       }
-      const next: Record<number, string> = {};
+      const next: Record<string, string> = {};
       for (const result of results) {
         if (result.status === 'fulfilled') {
-          const [peerID, safetyNumber] = result.value;
-          next[peerID] = safetyNumber;
+          const [peerAddress, safetyNumber] = result.value;
+          next[peerAddress] = safetyNumber;
         }
       }
       setPeerSafetyNumbers(next);
@@ -373,31 +484,51 @@ export function useMessages({
     };
   }, [api, auth, identity, identityBound, peers]);
 
-  const registerDeliveryAck = useCallback((messageID: number, fromUserID: number) => {
-    if (!Number.isFinite(messageID) || messageID <= 0 || !Number.isFinite(fromUserID) || fromUserID <= 0) {
+  const registerReadReceiptUpTo = useCallback((fromUserID: number, upToMessageID: number) => {
+    if (!auth || fromUserID <= 0 || upToMessageID <= 0) {
       return;
     }
-    setMessageReadReceipts((previous) => {
-      const current = previous[messageID] ?? [];
-      if (current.includes(fromUserID)) {
-        return previous;
+    // When the receipt comes from another device of the same user, advance our
+    // own local read cursor and unread count instead of marking outgoing
+    // messages as "read by peer".
+    if (fromUserID === auth.user.id) {
+      if (upToMessageID <= lastReadMessageIDRef.current) {
+        return;
       }
-      return {
-        ...previous,
-        [messageID]: [...current, fromUserID],
-      };
-    });
-  }, [setMessageReadReceipts]);
-
-  const registerReadReceiptUpTo = useCallback((fromUserID: number, upToMessageID: number) => {
-    if (!auth || fromUserID <= 0 || upToMessageID <= 0 || fromUserID === auth.user.id) {
+      lastReadMessageIDRef.current = Math.max(lastReadMessageIDRef.current, upToMessageID);
+      setLastReadMessageID((previous) => Math.max(previous, upToMessageID));
+      if (selectedRoomID) {
+        setLocalReadCursor(selectedRoomID, upToMessageID);
+        setRoomMembers((previous) => previous.map((member) => {
+          if (member.id !== auth.user.id) {
+            return member;
+          }
+          return {
+            ...member,
+            lastReadMessageId: Math.max(member.lastReadMessageId ?? 0, upToMessageID),
+          };
+        }));
+        setRooms((previous) => previous.map((room) => {
+          if (room.id !== selectedRoomID || room.lastMessageId === null || room.lastMessageId > upToMessageID) {
+            return room;
+          }
+          return {
+            ...room,
+            unreadCount: 0,
+          };
+        }));
+      }
       return;
     }
     setMessageReadReceipts((previous) => {
       let changed = false;
       const next = { ...previous };
       for (const message of messagesRef.current) {
-        if (message.senderId !== auth.user.id || message.id > upToMessageID) {
+        if (
+          message.senderId !== auth.user.id
+          || message.id > upToMessageID
+          || !isExpectedReadUser(message.payload?.wrappedKeys, message.senderId, fromUserID)
+        ) {
           continue;
         }
         const current = next[message.id] ?? [];
@@ -409,7 +540,7 @@ export function useMessages({
       }
       return changed ? next : previous;
     });
-  }, [auth, setMessageReadReceipts]);
+  }, [auth, selectedRoomID, setMessageReadReceipts, setLocalReadCursor, setRoomMembers, setRooms]);
 
   useEffect(() => {
     if (!auth || !selectedRoomID || roomMembers.length === 0) {
@@ -420,7 +551,7 @@ export function useMessages({
         registerReadReceiptUpTo(member.id, member.lastReadMessageId);
       }
     }
-  }, [auth, selectedRoomID, roomMembers, registerReadReceiptUpTo]);
+  }, [auth, selectedRoomID, roomMembers, messages, registerReadReceiptUpTo]);
 
   const hasOnlineSenderPeer = useCallback((senderUserID: number, senderDeviceID: string): boolean => {
     if (!Number.isFinite(senderUserID) || senderUserID <= 0) {
@@ -473,13 +604,19 @@ export function useMessages({
       || messageID <= 0
       || !Number.isFinite(senderUserID)
       || senderUserID <= 0
-      || senderUserID === auth.user.id
     ) {
       return 'invalid';
     }
 
     const normalizedSenderDeviceID = senderDeviceID.trim();
-    if (!hasOnlineSenderPeer(senderUserID, normalizedSenderDeviceID)) {
+    // Reject only same-user same-device which would loop back to ourselves.
+    if (senderUserID === auth.user.id && (!normalizedSenderDeviceID || normalizedSenderDeviceID === auth.device.deviceId)) {
+      return 'invalid';
+    }
+    // For other users, prefer sending only when we believe the target device is
+    // reachable. Self-user cross-device requests are always allowed because the
+    // server can route them to whichever device of ours is currently online.
+    if (senderUserID !== auth.user.id && !hasOnlineSenderPeer(senderUserID, normalizedSenderDeviceID)) {
       return 'offline';
     }
 
@@ -557,35 +694,13 @@ export function useMessages({
     }
   }, [auth, selectedRoomID, wsConnected, sendJSON]);
 
-  const emitReadReceipt = useCallback((upToMessageID: number) => {
+  const commitReadReceipt = useCallback((upToMessageID: number): boolean => {
     if (!auth || !selectedRoomID || !wsConnected || upToMessageID <= 0) {
-      return;
+      return false;
     }
     if (upToMessageID <= lastReadMessageIDRef.current) {
-      return;
-    }
-    const now = Date.now();
-    if (now - lastReadSentAtRef.current < READ_RECEIPT_THROTTLE_MS) {
-      pendingReadReceiptRef.current = Math.max(
-        pendingReadReceiptRef.current ?? 0,
-        upToMessageID,
-      );
-      if (!readReceiptTimerRef.current) {
-        readReceiptTimerRef.current = window.setTimeout(() => {
-          readReceiptTimerRef.current = null;
-          if (pendingReadReceiptRef.current) {
-            emitReadReceipt(pendingReadReceiptRef.current);
-            pendingReadReceiptRef.current = null;
-          }
-        }, READ_RECEIPT_THROTTLE_MS - (now - lastReadSentAtRef.current));
-      }
-      return;
-    }
-
-    if (readReceiptTimerRef.current) {
-      window.clearTimeout(readReceiptTimerRef.current);
-      readReceiptTimerRef.current = null;
       pendingReadReceiptRef.current = null;
+      return false;
     }
 
     const sent = sendJSON({
@@ -593,11 +708,92 @@ export function useMessages({
       upToMessageId: upToMessageID,
     });
     if (!sent) {
+      return false;
+    }
+
+    lastReadSentAtRef.current = Date.now();
+    lastReadMessageIDRef.current = upToMessageID;
+    pendingReadReceiptRef.current = null;
+    setLocalReadCursor(selectedRoomID, upToMessageID);
+    setLastReadMessageID((previous) => Math.max(previous, upToMessageID));
+    setRoomMembers((previous) => previous.map((member) => {
+      if (member.id !== auth.user.id) {
+        return member;
+      }
+      return {
+        ...member,
+        lastReadMessageId: Math.max(member.lastReadMessageId ?? 0, upToMessageID),
+      };
+    }));
+    setRooms((previous) => previous.map((room) => {
+      if (room.id !== selectedRoomID || room.lastMessageId === null || room.lastMessageId > upToMessageID) {
+        return room;
+      }
+      return {
+        ...room,
+        unreadCount: 0,
+      };
+    }));
+    return true;
+  }, [auth, selectedRoomID, wsConnected, sendJSON, setLocalReadCursor, setRoomMembers, setRooms]);
+
+  const flushPendingReadReceipt = useCallback(() => {
+    if (!auth || !selectedRoomID || !wsConnected) {
+      return false;
+    }
+    const pending = pendingReadReceiptRef.current;
+    if (!pending || pending <= 0) {
+      return false;
+    }
+
+    const elapsed = Date.now() - lastReadSentAtRef.current;
+    if (elapsed < READ_RECEIPT_THROTTLE_MS) {
+      if (!readReceiptTimerRef.current) {
+        readReceiptTimerRef.current = window.setTimeout(() => {
+          readReceiptTimerRef.current = null;
+          void flushPendingReadReceipt();
+        }, READ_RECEIPT_THROTTLE_MS - elapsed);
+      }
+      return false;
+    }
+
+    if (readReceiptTimerRef.current) {
+      window.clearTimeout(readReceiptTimerRef.current);
+      readReceiptTimerRef.current = null;
+    }
+
+    return commitReadReceipt(pending);
+  }, [auth, commitReadReceipt, selectedRoomID, wsConnected]);
+
+  const emitReadReceipt = useCallback((upToMessageID: number) => {
+    if (!auth || !selectedRoomID || upToMessageID <= 0) {
       return;
     }
-    lastReadSentAtRef.current = now;
-    lastReadMessageIDRef.current = upToMessageID;
-  }, [auth, selectedRoomID, wsConnected, sendJSON]);
+    if (upToMessageID <= lastReadMessageIDRef.current) {
+      return;
+    }
+    pendingReadReceiptRef.current = Math.max(pendingReadReceiptRef.current ?? 0, upToMessageID);
+    void flushPendingReadReceipt();
+  }, [auth, flushPendingReadReceipt, selectedRoomID]);
+
+  useEffect(() => {
+    if (!auth || !selectedRoomID) {
+      return;
+    }
+    const normalizedLastReadMessageID = Math.max(0, Math.floor(lastReadMessageID));
+    if (normalizedLastReadMessageID <= 0) {
+      return;
+    }
+    setRooms((previous) => previous.map((room) => {
+      if (room.id !== selectedRoomID) {
+        return room;
+      }
+      return {
+        ...room,
+        unreadCount: 0,
+      };
+    }));
+  }, [auth, lastReadMessageID, selectedRoomID, setRooms]);
 
   const notifyIncomingMessage = useCallback((message: UIMessage) => {
     if (!auth || message.senderId === auth.user.id || typeof Notification === 'undefined') {
@@ -727,7 +923,7 @@ export function useMessages({
         if (!senderDeviceID) {
           throw new Error('missing sender device id');
         }
-        const plaintext = await decryptPayload(
+        const { plaintext, rawContentKey } = await decryptPayloadWithContentKey(
           message.payload,
           auth.user.id,
           auth.device.deviceId,
@@ -736,7 +932,7 @@ export function useMessages({
           identity,
         );
         try {
-          await persistDecryptedPlaintext(auth.user.id, message, plaintext);
+          await persistDecryptedPlaintext(auth.user.id, message, plaintext, rawContentKey);
         } catch {
           // Ignore local plaintext cache write failure.
         }
@@ -854,8 +1050,19 @@ export function useMessages({
         if (options.notify) {
           notifyIncomingMessage(resolved);
         }
-      } else if (auth && resolved.senderId !== auth.user.id) {
-        requestDecryptRecoveryIfNeeded(resolved);
+      } else if (auth) {
+        // Allow recovery for both peer-sent messages and self-sent messages
+        // that arrived from a different device of the same user. The
+        // requestDecryptRecoveryIfNeeded helper checks that the sender device
+        // is not this device before sending the request.
+        const senderDeviceID = typeof resolved.payload?.senderDeviceId === 'string'
+          ? resolved.payload.senderDeviceId.trim()
+          : '';
+        const isOwnSelfDeviceMessage = resolved.senderId === auth.user.id
+          && (!senderDeviceID || senderDeviceID === auth.device.deviceId);
+        if (!isOwnSelfDeviceMessage) {
+          requestDecryptRecoveryIfNeeded(resolved);
+        }
       }
     },
     [
@@ -888,17 +1095,27 @@ export function useMessages({
       inserted = true;
       return [...previous, nextValue].sort((a, b) => a.id - b.id);
     });
+    if (message.payload.signature) {
+      setLocalDraftMessages((previous) =>
+        previous.filter((item) => item.localSignature !== message.payload.signature),
+      );
+    }
     if (inserted && !stickToBottomRef.current && auth && message.senderId !== auth.user.id) {
       setUnreadIncomingCount((previous) => previous + 1);
     }
-  }, [auth, setMessages]);
+  }, [auth, setLocalDraftMessages, setMessages]);
 
   const sendDecryptRecoveryPayload = useCallback(
     async (request: DecryptRecoveryRequestFrame): Promise<boolean> => {
       if (!auth || !identity || !identityBound) {
         return false;
       }
-      if (request.fromUserId <= 0 || request.messageId <= 0 || request.fromUserId === auth.user.id) {
+      if (request.fromUserId <= 0 || request.messageId <= 0) {
+        return false;
+      }
+      const requestFromDeviceID = typeof request.fromDeviceId === 'string' ? request.fromDeviceId.trim() : '';
+      // Reject only same-user same-device which would loop back to ourselves.
+      if (request.fromUserId === auth.user.id && (!requestFromDeviceID || requestFromDeviceID === auth.device.deviceId)) {
         return false;
       }
 
@@ -958,7 +1175,6 @@ export function useMessages({
         return false;
       }
 
-      const requestFromDeviceID = typeof request.fromDeviceId === 'string' ? request.fromDeviceId.trim() : '';
       if (requestFromDeviceID) {
         await resetRatchetSession(
           auth.user.id,
@@ -982,12 +1198,16 @@ export function useMessages({
       }
 
       const recoveryRecipients = sessionStatus.readyRecipients.filter((recipient) => {
-        if (recipient.userID === auth.user.id) {
-          return recipient.deviceID === auth.device.deviceId;
+        // Always include ourselves (so the encrypted payload also lands on this
+        // device's local cache and can be decrypted in case of replay).
+        if (recipient.userID === auth.user.id && recipient.deviceID === auth.device.deviceId) {
+          return true;
         }
         if (recipient.userID !== request.fromUserId) {
           return false;
         }
+        // For the requesting peer (different user, or same user different
+        // device), prefer the specific device, otherwise include all of them.
         if (!requestFromDeviceID) {
           return true;
         }
@@ -1028,10 +1248,130 @@ export function useMessages({
     [api, auth, identity, identityBound, resolveSignalBundle, selectedRoomID, sendJSON, setInfo],
   );
 
+  const sendEnvelopeRefill = useCallback(
+    async (request: EnvelopeRefillRequestFrame): Promise<boolean> => {
+      if (!auth || !identity || !identityBound || !selectedRoomID) {
+        return false;
+      }
+      if (
+        request.roomId !== selectedRoomID
+        || request.toUserId !== auth.user.id
+      ) {
+        return false;
+      }
+      const targetDeviceID = typeof request.fromDeviceId === 'string' ? request.fromDeviceId.trim() : '';
+      if (!targetDeviceID || targetDeviceID === auth.device.deviceId) {
+        return false;
+      }
+      let requestedIDs = [...new Set(
+        request.messageIds
+          .map((messageID) => Math.floor(Number(messageID)))
+          .filter((messageID) => Number.isFinite(messageID) && messageID > 0),
+      )].slice(0, 200);
+      if (requestedIDs.length === 0) {
+        try {
+          const refill = await api.requestDeviceEnvelopeRefill(targetDeviceID, selectedRoomID, []);
+          requestedIDs = [...new Set(refill.messageIds
+            .map((messageID) => Math.floor(Number(messageID)))
+            .filter((messageID) => Number.isFinite(messageID) && messageID > 0))]
+            .slice(0, 200);
+        } catch {
+          return false;
+        }
+      }
+      if (requestedIDs.length === 0) {
+        return false;
+      }
+
+      let originals = messagesRef.current.filter(
+        (item) =>
+          requestedIDs.includes(item.id)
+          && item.roomId === selectedRoomID
+          && item.senderId === auth.user.id,
+      ) as ChatMessage[];
+      const missingLocalIDs = requestedIDs.filter((messageID) => !originals.some((item) => item.id === messageID));
+      if (missingLocalIDs.length > 0) {
+        try {
+          const fetched = await Promise.all(missingLocalIDs.map((messageID) =>
+            api.fetchMessages(selectedRoomID, {
+              limit: 1,
+              beforeMessageID: messageID + 1,
+            }),
+          ));
+          const fetchedMessages = fetched
+            .flatMap((response) => response.messages)
+            .filter(
+              (message) =>
+                requestedIDs.includes(message.id)
+                && message.roomId === selectedRoomID
+                && message.senderId === auth.user.id,
+            );
+          originals = [...originals, ...fetchedMessages];
+        } catch {
+          // Keep going with the messages and keys that are already local.
+        }
+      }
+
+      const dedupedOriginals = [...new Map(originals.map((message) => [message.id, message])).values()];
+      if (dedupedOriginals.length === 0) {
+        return false;
+      }
+
+      const cachedKeys = await loadCachedContentKeys(auth.user.id, dedupedOriginals);
+      for (const message of dedupedOriginals) {
+        if (cachedKeys.has(message.id)) {
+          continue;
+        }
+        const signature = typeof message.payload?.signature === 'string' ? message.payload.signature.trim() : '';
+        if (!signature) {
+          continue;
+        }
+        const outgoingKey = await loadOutgoingContentKey(auth.user.id, message.roomId, signature);
+        if (outgoingKey) {
+          cachedKeys.set(message.id, outgoingKey);
+        }
+      }
+      if (cachedKeys.size === 0) {
+        return false;
+      }
+
+      await ensureRatchetSessionsForRecipients(
+        auth.user.id,
+        auth.device.deviceId,
+        identity,
+        [auth.user.id],
+        resolveSignalBundle,
+      );
+      const envelopes: Array<{ messageId: number; wrappedKey: ChatMessage['payload']['wrappedKeys'][string] }> = [];
+      for (const message of dedupedOriginals) {
+        const rawContentKey = cachedKeys.get(message.id);
+        if (!rawContentKey) {
+          continue;
+        }
+        const wrappedKey = await wrapContentKeyForRecipient(
+          auth.user.id,
+          auth.device.deviceId,
+          identity,
+          { userID: auth.user.id, deviceID: targetDeviceID },
+          rawContentKey,
+        );
+        envelopes.push({ messageId: message.id, wrappedKey });
+      }
+      if (envelopes.length === 0) {
+        return false;
+      }
+      await api.saveDeviceEnvelopeRefill(targetDeviceID, selectedRoomID, envelopes);
+      setInfo(`已为设备 ${targetDeviceID} 补发 ${envelopes.length} 条历史消息信封`);
+      return true;
+    },
+    [api, auth, identity, identityBound, resolveSignalBundle, selectedRoomID, setInfo],
+  );
+
   useEffect(() => {
     if (onRoomSwitch) {
       onRoomSwitch();
     }
+    setMessages([]);
     setIsRoomSwitching(Boolean(selectedRoomID));
     loadingMoreRef.current = false;
     preserveScrollRef.current = false;
@@ -1057,6 +1397,8 @@ export function useMessages({
     setMessageReadReceipts({});
     setFocusMessageID(null);
     setUnreadIncomingCount(0);
+    setFirstUnreadMessageID(null);
+    setLastReadMessageID(0);
     ackedMessageIDsRef.current.clear();
     pendingAckMessageIDsRef.current.clear();
     pendingResyncRecoveryRef.current.clear();
@@ -1070,6 +1412,57 @@ export function useMessages({
     }
     remoteTypingTimersRef.current.clear();
   }, [onRoomSwitch, selectedRoomID, setMessageReadReceipts, setMessages]);
+
+  useEffect(() => {
+    if (!auth || !selectedRoomID) {
+      return;
+    }
+    const self = roomMembers.find((member) => member.id === auth.user.id);
+    const lastReadMessageID = self?.lastReadMessageId;
+    if (typeof lastReadMessageID !== 'number') {
+      return;
+    }
+    const normalized = Math.max(0, Math.floor(lastReadMessageID));
+    lastReadMessageIDRef.current = Math.max(lastReadMessageIDRef.current, normalized);
+    setLocalReadCursor(selectedRoomID, normalized);
+    setLastReadMessageID((previous) => Math.max(previous, normalized));
+  }, [auth, selectedRoomID, roomMembers, setLocalReadCursor]);
+
+  useEffect(() => {
+    if (!auth || !selectedRoomID || !wsConnected || pendingReadReceiptRef.current === null) {
+      return;
+    }
+    void flushPendingReadReceipt();
+  }, [auth, flushPendingReadReceipt, selectedRoomID, wsConnected, handshakeTick]);
+
+  useEffect(() => {
+    if (!auth || !selectedRoomID || !wsConnected) {
+      return;
+    }
+    const pending = pendingReadReceiptRef.current;
+    if (pending === null || pending <= 0 || pending <= lastReadMessageIDRef.current) {
+      return;
+    }
+    setRoomMembers((previous) => previous.map((member) => {
+      if (member.id !== auth.user.id) {
+        return member;
+      }
+      return {
+        ...member,
+        lastReadMessageId: Math.max(member.lastReadMessageId ?? 0, pending),
+      };
+    }));
+  }, [auth, selectedRoomID, wsConnected, setRoomMembers]);
+
+  useEffect(() => {
+    if (!auth || messages.length === 0) {
+      setFirstUnreadMessageID(null);
+      return;
+    }
+    setFirstUnreadMessageID(
+      findFirstUnreadIncomingMessageID(messages, auth.user.id, lastReadMessageID),
+    );
+  }, [auth, lastReadMessageID, messages]);
 
   useEffect(() => {
     if (!auth || !identity || !identityBound || !selectedRoomID) {
@@ -1112,7 +1505,7 @@ export function useMessages({
         historyBeforeIDRef.current = decrypted[0]?.id ?? null;
         stickToBottomRef.current = true;
 
-        setMessages(decrypted);
+        setMessages((previous) => mergeMessagesByID(previous, decrypted));
         for (const item of decrypted) {
           if (item.decryptState === 'ok') {
             queueDecryptAck(item);
@@ -1214,8 +1607,13 @@ export function useMessages({
           return;
         }
         setPeers((previous) => ({ ...previous, [buildRecipientAddress(peer.userId, peer.deviceId)]: peer }));
-        // Proactively establish ratchet session with new peer
-        if (peer.userId !== auth.user.id) {
+        // Proactively establish ratchet session with new peer. This also covers
+        // the multi-device case where one of our own devices joins the room
+        // (peer.userId === auth.user.id but peer.deviceId !== local device id) —
+        // we still need to fetch the new peer's prekey bundle and create a
+        // session so future messages reach them.
+        const isAnotherOwnDevice = peer.userId === auth.user.id && peer.deviceId !== auth.device.deviceId;
+        if (peer.userId !== auth.user.id || isAnotherOwnDevice) {
           void ensureRatchetSessionsForRecipients(
             auth.user.id,
             auth.device.deviceId,
@@ -1253,6 +1651,36 @@ export function useMessages({
         return;
       }
 
+      if (frame.type === 'user_bundle_changed') {
+        const bundleChange = frame as unknown as UserBundleChangedFrame;
+        const targetUserID = Number(bundleChange.userId);
+        if (!Number.isFinite(targetUserID) || targetUserID <= 0) {
+          return;
+        }
+        // Refresh ratchet sessions for the user whose bundle just changed so we
+        // pick up newly registered devices (e.g. a user just logged in on a
+        // second device and uploaded a fresh prekey bundle). The handshake
+        // tick bump retriggers any pending send-queue items so they encrypt
+        // for the new device too.
+        const isOwnUser = targetUserID === auth.user.id;
+        if (isOwnUser && bundleChange.deviceId === auth.device.deviceId) {
+          // Our own publish — ignore the echo.
+          return;
+        }
+        void ensureRatchetSessionsForRecipients(
+          auth.user.id,
+          auth.device.deviceId,
+          identity,
+          [auth.user.id, targetUserID],
+          resolveSignalBundle,
+        ).then(() => {
+          bumpHandshakeTick();
+        }).catch(() => {
+          // Best-effort; the next message send will retry session setup.
+        });
+        return;
+      }
+
       if (frame.type === 'ciphertext') {
         const message = frame as unknown as ChatMessage;
         if (message.roomId !== selectedRoomID) {
@@ -1266,11 +1694,6 @@ export function useMessages({
       }
 
       if (frame.type === 'decrypt_ack') {
-        const ack = frame as unknown as DecryptAckFrame;
-        if (ack.roomId !== selectedRoomID) {
-          return;
-        }
-        registerDeliveryAck(Number(ack.messageId), Number(ack.fromUserId));
         return;
       }
 
@@ -1334,6 +1757,14 @@ export function useMessages({
         }
         if (protocolError.code === 'invalid_payload_format') {
           setError('消息密文格式异常。可先请求重同步；若仍失败，请重新登录后重试。');
+          return;
+        }
+        if (protocolError.code === 'ciphertext_rate_limited') {
+          setError('发送过快，请稍后再试。');
+          return;
+        }
+        if (protocolError.code === 'websocket_auth_expired') {
+          setError('登录状态已失效，请重新登录。');
           return;
         }
         const detail = typeof protocolError.message === 'string' && protocolError.message.trim()
@@ -1407,24 +1838,28 @@ export function useMessages({
           payload: recovery.payload,
         };
         upsertIncomingMessage(repairedMessage);
-        const wrappedForMe = recovery.payload?.wrappedKeys?.[
-          buildRecipientAddress(auth.user.id, auth.device.deviceId)
-        ];
-        void (async () => {
-          const recoveryFromDeviceID = typeof recovery.fromDeviceId === 'string' ? recovery.fromDeviceId.trim() : '';
-          if (wrappedForMe?.preKeyMessage && recoveryFromDeviceID) {
-            await resetRatchetSession(
-              auth.user.id,
-              auth.device.deviceId,
-              recovery.fromUserId,
-              recoveryFromDeviceID,
-            );
-          }
-          void enqueueDecryptTask(async () => {
-            await decryptAndUpdate(repairedMessage);
-          });
-        })();
+        // Let decryptPayload's existing prekey-bootstrap fallback handle the
+        // session establishment. Eagerly resetting can cause oscillation when
+        // the peer issues redundant recovery payloads.
+        void enqueueDecryptTask(async () => {
+          await decryptAndUpdate(repairedMessage);
+        });
         setInfo(`已收到消息 #${recovery.messageId} 的解密恢复数据`);
+        return;
+      }
+
+      if (frame.type === 'envelope_refill_request') {
+        const request = frame as unknown as EnvelopeRefillRequestFrame;
+        if (request.roomId !== selectedRoomID || request.toUserId !== auth.user.id) {
+          return;
+        }
+        const requestToDeviceID = typeof request.toDeviceId === 'string' ? request.toDeviceId.trim() : '';
+        if (requestToDeviceID && requestToDeviceID !== auth.device.deviceId) {
+          return;
+        }
+        void sendEnvelopeRefill(request).catch((reason: unknown) => {
+          reportError(reason, '补发设备信封失败');
+        });
         return;
       }
 
@@ -1438,6 +1873,11 @@ export function useMessages({
           return;
         }
         if (request.fromUserId <= 0 || request.messageId <= 0) {
+          return;
+        }
+        const requestFromDeviceID = typeof request.fromDeviceId === 'string' ? request.fromDeviceId.trim() : '';
+        // Reject same-user same-device which would loop back to ourselves.
+        if (request.fromUserId === auth.user.id && (!requestFromDeviceID || requestFromDeviceID === auth.device.deviceId)) {
           return;
         }
 
@@ -1472,6 +1912,7 @@ export function useMessages({
           });
         }
       }
+
     });
     return unsubscribe;
   }, [
@@ -1485,7 +1926,7 @@ export function useMessages({
     upsertIncomingMessage,
     resolveSignalBundle,
     sendDecryptRecoveryPayload,
-    registerDeliveryAck,
+    sendEnvelopeRefill,
     registerReadReceiptUpTo,
     reportError,
     bumpHandshakeTick,
@@ -1501,32 +1942,46 @@ export function useMessages({
       return;
     }
     const unsubscribeOpen = subscribeOpen(() => {
-      const latestKnown = messagesRef.current[messagesRef.current.length - 1];
-      if (!latestKnown || latestKnown.id <= 0) {
-        return;
-      }
-      api.fetchMessages(selectedRoomID, { limit: 50, afterMessageID: latestKnown.id })
-        .then(async ({ messages: serverMessages }) => {
+      const requestedRoomID = selectedRoomID;
+      api.listRoomMembers(selectedRoomID)
+        .then(({ members }) => {
+          if (activeRoomIDRef.current !== requestedRoomID) {
+            return;
+          }
+          setRoomMembers(members);
+        })
+        .catch((reason: unknown) => {
+          reportError(reason, '重连同步成员已读状态失败');
+        });
+
+      const latestKnownID = findLatestServerMessageID(messagesRef.current);
+      fetchMissingMessagesAfterCursor(
+        (afterMessageID) => api.fetchMessages(selectedRoomID, {
+          limit: MESSAGE_PAGE_SIZE,
+          ...(afterMessageID ? { afterMessageID } : {}),
+        }),
+        latestKnownID,
+        MESSAGE_PAGE_SIZE,
+      )
+        .then(async (serverMessages) => {
+          if (activeRoomIDRef.current !== requestedRoomID) {
+            return;
+          }
           if (serverMessages.length === 0) {
             return;
           }
-          const sorted = [...serverMessages].sort((a, b) => a.id - b.id);
           let cachedPlaintexts = new Map<number, string>();
           try {
-            cachedPlaintexts = await loadCachedPlaintexts(auth.user.id, sorted);
+            cachedPlaintexts = await loadCachedPlaintexts(auth.user.id, serverMessages);
           } catch {
             cachedPlaintexts = new Map<number, string>();
           }
-          const decrypted = await decryptMessagesSequentially(sorted, cachedPlaintexts);
+          const decrypted = await decryptMessagesSequentially(serverMessages, cachedPlaintexts);
+          if (activeRoomIDRef.current !== requestedRoomID) {
+            return;
+          }
 
-          setMessages((previous) => {
-            const existingIDs = new Set(previous.map((item) => item.id));
-            const deduped = decrypted.filter((m) => !existingIDs.has(m.id));
-            if (deduped.length === 0) {
-              return previous;
-            }
-            return [...previous, ...deduped].sort((a, b) => a.id - b.id);
-          });
+          setMessages((previous) => mergeMessagesByID(previous, decrypted));
 
           for (const item of decrypted) {
             if (item.decryptState === 'ok') {
@@ -1539,7 +1994,7 @@ export function useMessages({
         });
     });
     return unsubscribeOpen;
-  }, [auth, identity, identityBound, selectedRoomID, subscribeOpen, api, decryptMessagesSequentially, setMessages, queueDecryptAck, reportError]);
+  }, [auth, identity, identityBound, selectedRoomID, subscribeOpen, api, decryptMessagesSequentially, setMessages, queueDecryptAck, reportError, setRoomMembers]);
 
   useEffect(() => {
     if (!wsConnected) {
@@ -1575,7 +2030,12 @@ export function useMessages({
           await decryptAndUpdate(message);
         });
       }
-      if (message.senderId !== auth.user.id) {
+      const messageSenderDeviceID = typeof message.payload?.senderDeviceId === 'string'
+        ? message.payload.senderDeviceId.trim()
+        : '';
+      const isOwnSelfDeviceMessage = message.senderId === auth.user.id
+        && (!messageSenderDeviceID || messageSenderDeviceID === auth.device.deviceId);
+      if (!isOwnSelfDeviceMessage) {
         requestDecryptRecoveryIfNeeded(message);
       }
     }
@@ -1629,12 +2089,29 @@ export function useMessages({
     }
     const prevCount = lastScrolledMessageCountRef.current;
     lastScrolledMessageCountRef.current = messages.length;
+    let latestReadableIncomingMessageID = 0;
+    if (auth) {
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message.senderId === auth.user.id || message.decryptState !== 'ok') {
+          continue;
+        }
+        latestReadableIncomingMessageID = message.id;
+        break;
+      }
+    }
     if (messages.length > 0 && messages.length === prevCount) {
+      if (latestReadableIncomingMessageID > lastReadMessageIDRef.current) {
+        emitReadReceipt(latestReadableIncomingMessageID);
+      }
       return;
     }
     setUnreadIncomingCount(0);
     list.scrollTop = list.scrollHeight;
-  }, [isRoomSwitching, messages]);
+    if (latestReadableIncomingMessageID > 0) {
+      emitReadReceipt(latestReadableIncomingMessageID);
+    }
+  }, [auth, emitReadReceipt, isRoomSwitching, messages]);
 
   const getLatestReadableIncomingMessageID = useCallback((): number => {
     if (!auth) {
@@ -1940,9 +2417,6 @@ export function useMessages({
     if (!auth || !selectedRoomID) {
       return;
     }
-    if (senderUserID === auth.user.id) {
-      return;
-    }
     const targetMessage = messagesRef.current.find((item) => item.id === messageID);
     const targetDeviceID = typeof targetMessage?.payload?.senderDeviceId === 'string'
       ? targetMessage.payload.senderDeviceId.trim()
@@ -1971,7 +2445,7 @@ export function useMessages({
     setFocusMessageID(null);
   }, []);
 
-  const timelineItems = useTimelineItems(messages, toLocalDateParts, formatTimelineLabel);
+  const timelineItems = useTimelineItems(messages, toLocalDateParts, formatTimelineLabel, firstUnreadMessageID);
 
   const typingIndicatorText = useMemo(() => {
     const usernames = Object.values(typingUsers).filter(Boolean);
@@ -2010,6 +2484,7 @@ export function useMessages({
     messageListRef,
     messageEndRef,
     focusMessageID,
+    lastReadMessageID,
     unreadIncomingCount,
     timelineItems,
     emitTypingStatus,

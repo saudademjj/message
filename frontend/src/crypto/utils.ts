@@ -149,36 +149,40 @@ export function trimSkippedCache(skipped: Record<string, string>): Record<string
 }
 
 export function canonicalCipherPayloadForSignature(payload: CipherPayload): string {
-  const wrappedEntries = Object.keys(payload.wrappedKeys)
-    .sort((left, right) => left.localeCompare(right))
-    .map((recipientID) => {
-      const wrapped = payload.wrappedKeys[recipientID];
-      const preKeyMessage = wrapped.preKeyMessage
-        ? {
-            identityKeyJwk: wrapped.preKeyMessage.identityKeyJwk,
-            identitySigningPublicKeyJwk: wrapped.preKeyMessage.identitySigningPublicKeyJwk ?? null,
-            ephemeralKeyJwk: wrapped.preKeyMessage.ephemeralKeyJwk,
-            signedPreKeyId: normalizeCounter(wrapped.preKeyMessage.signedPreKeyId),
-            oneTimePreKeyId: wrapped.preKeyMessage.oneTimePreKeyId == null
-              ? null
-              : normalizeCounter(wrapped.preKeyMessage.oneTimePreKeyId),
-            preKeyBundleUpdatedAt: wrapped.preKeyMessage.preKeyBundleUpdatedAt ?? '',
-          }
-        : null;
-      return {
-        recipientId: recipientID,
-        iv: wrapped.iv,
-        wrappedKey: wrapped.wrappedKey,
-        ratchetDhPublicKeyJwk: wrapped.ratchetDhPublicKeyJwk ?? null,
-        preKeyMessage,
-        messageNumber: normalizeCounter(wrapped.messageNumber),
-        previousChainLength: normalizeCounter(wrapped.previousChainLength),
-        sessionVersion: normalizeCounter(wrapped.sessionVersion),
-      };
-    });
+  const version = normalizeCounter(payload.version);
+  const wrappedEntries = version >= 4
+    ? []
+    : Object.keys(payload.wrappedKeys)
+      .sort((left, right) => left.localeCompare(right))
+      .map((recipientID) => {
+        const wrapped = payload.wrappedKeys[recipientID];
+        const preKeyMessage = wrapped.preKeyMessage
+          ? {
+              identityKeyJwk: wrapped.preKeyMessage.identityKeyJwk,
+              identitySigningPublicKeyJwk: wrapped.preKeyMessage.identitySigningPublicKeyJwk ?? null,
+              ephemeralKeyJwk: wrapped.preKeyMessage.ephemeralKeyJwk,
+              signedPreKeyId: normalizeCounter(wrapped.preKeyMessage.signedPreKeyId),
+              oneTimePreKeyId: wrapped.preKeyMessage.oneTimePreKeyId == null
+                ? null
+                : normalizeCounter(wrapped.preKeyMessage.oneTimePreKeyId),
+              preKeyBundleUpdatedAt: wrapped.preKeyMessage.preKeyBundleUpdatedAt ?? '',
+            }
+          : null;
+        return {
+          recipientId: recipientID,
+          iv: wrapped.iv,
+          wrappedKey: wrapped.wrappedKey,
+          recipientAad: wrapped.recipientAad ?? '',
+          ratchetDhPublicKeyJwk: wrapped.ratchetDhPublicKeyJwk ?? null,
+          preKeyMessage,
+          messageNumber: normalizeCounter(wrapped.messageNumber),
+          previousChainLength: normalizeCounter(wrapped.previousChainLength),
+          sessionVersion: normalizeCounter(wrapped.sessionVersion),
+        };
+      });
 
   return stableJSONStringify({
-    version: normalizeCounter(payload.version),
+    version,
     ciphertext: payload.ciphertext,
     messageIv: payload.messageIv,
     wrappedKeys: wrappedEntries,

@@ -37,6 +37,8 @@ export function useChatRouteState({ setManagedUsers }: UseChatRouteStateParams) 
   const peerPopoverRef = useRef<HTMLDivElement | null>(null);
   const roomModalCardRef = useRef<HTMLElement | null>(null);
   const adminModalCardRef = useRef<HTMLElement | null>(null);
+  const deviceModalCardRef = useRef<HTMLElement | null>(null);
+  const profileModalCardRef = useRef<HTMLElement | null>(null);
   const draftInputRef = useRef<HTMLTextAreaElement | null>(null);
   const typingIdleTimerRef = useRef<number | null>(null);
 
@@ -115,6 +117,8 @@ export function useChatRouteState({ setManagedUsers }: UseChatRouteStateParams) 
     peerPopoverRef,
     roomModalCardRef,
     adminModalCardRef,
+    deviceModalCardRef,
+    profileModalCardRef,
     draftInputRef,
     typingIdleTimerRef,
     chatPathForRoom,

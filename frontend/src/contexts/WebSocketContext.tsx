@@ -226,12 +226,16 @@ export function WebSocketProvider({ api, apiBase, children }: WebSocketProviderP
     };
 
     ws.onclose = (event) => {
-      if (wsRef.current === ws) {
+      const isCurrentSocket = wsRef.current === ws;
+      if (isCurrentSocket) {
         wsRef.current = null;
+        setWsConnected(false);
       }
-      setWsConnected(false);
+      if (!isCurrentSocket) {
+        return;
+      }
 
-      if (event.code === 4001) {
+      if (event.code === 4001 || event.code === 1008) {
         markAuthExpired('登录状态已失效，请重新登录');
         logout();
         return;

@@ -9,6 +9,8 @@ import {
 } from '../../app/helpers';
 import type { UIMessage } from '../../app/appTypes';
 import { AdminPanelModal } from '../../components/AdminPanelModal';
+import { DevicePanelModal } from '../../components/DevicePanelModal';
+import { ProfileModal } from '../../components/ProfileModal';
 import { RoomModal } from '../../components/RoomModal';
 import { ToastLayer } from '../../components/ToastLayer';
 import { renderMarkdownSafe } from '../../markdown';
@@ -19,6 +21,7 @@ import type { useChatRouteDataControllers } from './useChatRouteDataControllers'
 import type { useChatRouteState } from './useChatRouteState';
 import type { useChatRouteViewModel } from './useChatRouteViewModel';
 import type { useComposerController } from './useComposerController';
+import type { useProfileController } from './useProfileController';
 
 type ChatRouteControllers = ReturnType<typeof useChatRouteDataControllers>;
 type ChatRouteState = ReturnType<typeof useChatRouteState>;
@@ -30,13 +33,20 @@ type ChatRouteLayoutProps = {
     username: string;
     role: 'admin' | 'user';
   };
+  authDevice: {
+    deviceId: string;
+    deviceName: string;
+    lastSeenAt: string;
+  };
   managedUsersCount: number;
   busy: boolean;
   roomsController: ChatRouteControllers['roomsController'];
   messagesController: ChatRouteControllers['messagesController'];
   sendQueueController: ChatRouteControllers['sendQueueController'];
+  devicesController: ChatRouteControllers['devicesController'];
   adminController: ReturnType<typeof useAdminPanelController>;
   composerController: ReturnType<typeof useComposerController>;
+  profileController: ReturnType<typeof useProfileController>;
   viewModel: ReturnType<typeof useChatRouteViewModel>;
   ui: Pick<
     ChatRouteState,
@@ -48,6 +58,8 @@ type ChatRouteLayoutProps = {
     | 'peerPopoverRef'
     | 'roomModalCardRef'
     | 'adminModalCardRef'
+    | 'deviceModalCardRef'
+    | 'profileModalCardRef'
     | 'adminModalOpen'
     | 'adminUserSearch'
     | 'setAdminUserSearch'
@@ -75,13 +87,16 @@ type ChatRouteLayoutProps = {
 
 export function ChatRouteLayout({
   authUser,
+  authDevice,
   managedUsersCount,
   busy,
   roomsController,
   messagesController,
   sendQueueController,
+  devicesController,
   adminController,
   composerController,
+  profileController,
   viewModel,
   ui,
   actions,
@@ -102,8 +117,13 @@ export function ChatRouteLayout({
         selectedRoomID={roomsController.selectedRoomID}
         onSelectRoom={roomsController.setSelectedRoomID}
         openRoomModal={roomsController.openRoomModal}
+        openDeviceModal={() => {
+          devicesController.openDeviceModal();
+          ui.closeSidebar();
+        }}
         openAdminModal={actions.handleOpenAdminModal}
         onLogout={actions.handleLogout}
+        onOpenProfile={profileController.openProfileModal}
         managedUsersCount={managedUsersCount}
         selectedRoom={roomsController.selectedRoom}
         roomMembers={roomsController.roomMembers}
@@ -189,6 +209,57 @@ export function ChatRouteLayout({
         onJoinRoom={actions.handleJoinRoomWrapper}
         onNewRoomNameChange={roomsController.setNewRoomName}
         onJoinRoomIDChange={roomsController.setJoinRoomID}
+      />
+      <DevicePanelModal
+        open={devicesController.deviceModalOpen}
+        busy={devicesController.deviceBusy}
+        devices={devicesController.devices}
+        modalRef={ui.deviceModalCardRef}
+        onClose={devicesController.closeDeviceModal}
+        onRefresh={() => {
+          void devicesController.refreshDevices();
+        }}
+        onRename={(deviceID, deviceName) => {
+          void devicesController.renameDevice(deviceID, deviceName);
+        }}
+        onApprove={(deviceID) => {
+          void devicesController.approveDevice(deviceID);
+        }}
+        onSaveRecoveryBackup={(phrase) => {
+          void devicesController.saveRecoveryBackup(phrase);
+        }}
+        onRevoke={(deviceID) => {
+          const target = devicesController.devices.find((device) => device.deviceId === deviceID);
+          const confirmed = window.confirm(
+            target?.current
+              ? '撤销当前设备后将立即退出登录，确认继续？'
+              : `确认撤销设备 ${target?.deviceName ?? deviceID}？`,
+          );
+          if (!confirmed) {
+            return;
+          }
+          void devicesController.revokeDevice(deviceID).then((forcedLogout) => {
+            if (forcedLogout) {
+              actions.handleLogout();
+            }
+          });
+        }}
+      />
+      <ProfileModal
+        key={profileController.profileModalOpen ? 'profile-open' : 'profile-closed'}
+        open={profileController.profileModalOpen}
+        busy={busy}
+        user={authUser}
+        device={{
+          deviceId: authDevice.deviceId,
+          deviceName: authDevice.deviceName,
+          lastSeenAt: authDevice.lastSeenAt,
+        }}
+        isAdmin={authUser.role === 'admin'}
+        modalRef={ui.profileModalCardRef}
+        onClose={profileController.closeProfileModal}
+        onUpdateUsername={profileController.handleUpdateUsername}
+        onChangePassword={profileController.handleChangePassword}
       />
       {authUser.role === 'admin' ? (
         <AdminPanelModal

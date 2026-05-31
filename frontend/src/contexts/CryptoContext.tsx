@@ -10,9 +10,12 @@ import {
 } from 'react';
 import {
   loadOrCreateIdentityForDevice,
+  replenishOneTimePreKeysIfNeeded,
   rotateIdentityIfNeeded,
+  toSignalPreKeyBundleUpload,
   type Identity,
 } from '../crypto';
+import type { ApiClient } from '../api';
 import { useAuth } from './AuthContext';
 
 type CryptoContextValue = {
@@ -48,10 +51,11 @@ function isIdentityBoundToSession(identity: Identity | null, userID: number, dev
 }
 
 type CryptoProviderProps = {
+  api: ApiClient;
   children: ReactNode;
 };
 
-export function CryptoProvider({ children }: CryptoProviderProps) {
+export function CryptoProvider({ api, children }: CryptoProviderProps) {
   const { auth } = useAuth();
   const authUserID = auth?.user.id ?? null;
   const authDeviceID = auth?.device.deviceId ?? null;
@@ -108,6 +112,44 @@ export function CryptoProvider({ children }: CryptoProviderProps) {
       cancelled = true;
     };
   }, [authDeviceID, authUserID]);
+
+  useEffect(() => {
+    if (!authUserID || !authDeviceID || !identity || !isIdentityBoundToSession(identity, authUserID, authDeviceID)) {
+      return;
+    }
+    if (identity.oneTimePreKeys.length >= 8) {
+      return;
+    }
+
+    let cancelled = false;
+    const publishReplenishedBundle = async () => {
+      try {
+        const { identity: nextIdentity, replenished } = await replenishOneTimePreKeysIfNeeded(authUserID, authDeviceID);
+        if (cancelled || !replenished) {
+          return;
+        }
+        if (!isIdentityBoundToSession(nextIdentity, authUserID, authDeviceID)) {
+          setIdentity(null);
+          setCryptoError('本地安全身份与当前会话不一致，请刷新页面后重新登录');
+          return;
+        }
+        await api.publishSignalPreKeyBundle(toSignalPreKeyBundleUpload(nextIdentity));
+        if (!cancelled) {
+          setIdentity(nextIdentity);
+          setCryptoInfo('一次性预密钥已补给');
+        }
+      } catch (reason: unknown) {
+        if (!cancelled) {
+          setCryptoError(formatCryptoError(reason, '一次性预密钥补给失败'));
+        }
+      }
+    };
+    void publishReplenishedBundle();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [api, authDeviceID, authUserID, identity]);
 
   useEffect(() => {
     if (!authUserID || !authDeviceID) {

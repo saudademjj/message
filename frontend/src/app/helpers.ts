@@ -250,6 +250,26 @@ export function formatTime(timestamp: string): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+export function formatRoomActivityLabel(timestamp: string, now = new Date()): string {
+  const value = new Date(timestamp);
+  if (Number.isNaN(value.getTime())) {
+    return '';
+  }
+  const today = dayStart(now);
+  const activityDay = dayStart(value);
+  const delta = Math.round((today - activityDay) / (24 * 60 * 60 * 1000));
+  if (delta === 0) {
+    return value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  if (delta === 1) {
+    return '昨天';
+  }
+  if (value.getFullYear() === now.getFullYear()) {
+    return `${value.getMonth() + 1}月${value.getDate()}日`;
+  }
+  return `${value.getFullYear()}年${value.getMonth() + 1}月${value.getDate()}日`;
+}
+
 export function avatarGlyph(username: string): string {
   const trimmed = username.trim();
   return trimmed ? trimmed.slice(0, 1).toUpperCase() : '?';

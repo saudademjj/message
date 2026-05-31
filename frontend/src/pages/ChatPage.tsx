@@ -1,9 +1,13 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { ChatComposer, type FailedSendQueueItem } from '../components/ChatComposer';
 import { ChatTimeline, type QuoteReplyPayload } from '../components/ChatTimeline';
+import { formatRoomActivityLabel } from '../app/helpers';
 import type { UIMessage, ThemeMode } from '../app/appTypes';
 import type { TimelineItem } from '../hooks/useTimelineItems';
 import type { Peer, Room, User } from '../types';
+import { buildRecipientAddress } from '../crypto/utils';
 
 type ChatPageProps = {
   authUser: {
@@ -21,8 +25,10 @@ type ChatPageProps = {
   selectedRoomID: number | null;
   onSelectRoom: (roomID: number) => void;
   openRoomModal: (mode: 'create' | 'join') => void;
+  openDeviceModal: () => void;
   openAdminModal: () => void;
   onLogout: () => void;
+  onOpenProfile: () => void;
   managedUsersCount: number;
   selectedRoom: Room | null;
   busy: boolean;
@@ -50,7 +56,7 @@ type ChatPageProps = {
   pendingQueueCount: number;
   failedQueueCount: number;
   onlinePeers: Peer[];
-  peerSafetyNumbers: Record<number, string>;
+  peerSafetyNumbers: Record<string, string>;
   avatarBackground: (seed: number) => string;
   avatarGlyph: (username: string) => string;
   messageReadReceipts: Record<number, number[]>;
@@ -107,8 +113,10 @@ export function ChatPage({
   selectedRoomID,
   onSelectRoom,
   openRoomModal,
+  openDeviceModal,
   openAdminModal,
   onLogout,
+  onOpenProfile,
   managedUsersCount,
   selectedRoom,
   busy,
@@ -180,6 +188,47 @@ export function ChatPage({
   cryptoReady,
   wsConnected,
 }: ChatPageProps) {
+  const peerTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [peerPopoverPosition, setPeerPopoverPosition] = useState<{
+    top: number;
+    right: number;
+    maxHeight: number;
+  } | null>(null);
+
+  const computePeerPopoverPosition = useCallback(() => {
+    const trigger = peerTriggerRef.current;
+    if (!trigger) {
+      return null;
+    }
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    // Mobile uses a bottom-sheet layout from CSS; skip inline positioning.
+    if (viewportWidth <= 900) {
+      return null;
+    }
+    const rect = trigger.getBoundingClientRect();
+    const top = rect.bottom + 10;
+    const right = Math.max(12, viewportWidth - rect.right);
+    const maxHeight = Math.max(160, viewportHeight - top - 16);
+    return { top, right, maxHeight };
+  }, []);
+
+  useEffect(() => {
+    if (!peerPanelOpen) {
+      return;
+    }
+    const sync = () => {
+      setPeerPopoverPosition(computePeerPopoverPosition());
+    };
+    sync();
+    window.addEventListener('resize', sync);
+    window.addEventListener('scroll', sync, true);
+    return () => {
+      window.removeEventListener('resize', sync);
+      window.removeEventListener('scroll', sync, true);
+    };
+  }, [computePeerPopoverPosition, peerPanelOpen]);
+
   return (
     <main className="chat-shell">
       <div className="stage-glow stage-left" />
@@ -202,9 +251,15 @@ export function ChatPage({
           <button className="ghost-btn sidebar-close" onClick={closeSidebar} type="button">
             收起菜单
           </button>
-          <p className="identity-line">
-            已登录: <strong>{authUser.username}</strong> ({authUser.role})
-          </p>
+          <button className="profile-card-btn" onClick={onOpenProfile} type="button" aria-label="打开个人主页">
+            <span className="profile-card-avatar" style={{ background: avatarBackground(authUser.id) }}>
+              {avatarGlyph(authUser.username)}
+            </span>
+            <span className="profile-card-meta">
+              <span className="profile-card-name">{authUser.username}</span>
+              <span className="profile-card-role">{authUser.role === 'admin' ? '管理员' : '成员'}</span>
+            </span>
+          </button>
           <button className="ghost-btn" onClick={onLogout} type="button">
             退出
           </button>
@@ -230,13 +285,28 @@ export function ChatPage({
                   }}
                   type="button"
                 >
-                  #{room.id} {room.name}
+                  <span className="room-list-main">
+                    <span className="room-list-name">
+                      #{room.id} {room.name}
+                    </span>
+                    <span className="room-list-activity">
+                      {formatRoomActivityLabel(room.lastActivityAt)}
+                    </span>
+                  </span>
+                  <span className="room-list-subline">
+                    <span>{room.lastMessageId ? '最近有消息' : '等待首条消息'}</span>
+                    {room.unreadCount > 0 ? (
+                      <span className="room-unread-badge" aria-label={`${room.unreadCount} 条未读消息`}>
+                        {room.unreadCount > 99 ? '99+' : room.unreadCount}
+                      </span>
+                    ) : null}
+                  </span>
                 </button>
               </li>
             ))}
             {filteredRooms.length === 0 ? (
               <li>
-                <p className="room-list-empty">没有匹配的房间</p>
+                <p className="room-list-empty">没有匹配的房间，换个关键词试试</p>
               </li>
             ) : null}
           </ul>
@@ -249,6 +319,9 @@ export function ChatPage({
           </button>
           <button className="ghost-btn room-action-btn" onClick={() => openRoomModal('join')} type="button">
             + 邀请加入
+          </button>
+          <button className="ghost-btn room-action-btn" onClick={openDeviceModal} type="button">
+            设备管理
           </button>
           {authUser.role === 'admin' ? (
             <button className="ghost-btn room-action-btn admin-launch-btn" onClick={openAdminModal} type="button">
@@ -296,6 +369,7 @@ export function ChatPage({
               <button
                 className={peerPanelOpen ? 'status-pill neutral peer-pill open' : 'status-pill neutral peer-pill'}
                 onClick={onTogglePeerPanel}
+                ref={peerTriggerRef}
                 type="button"
               >
                 详情
@@ -332,48 +406,64 @@ export function ChatPage({
                 </div>
               ) : null}
             </div>
-            {peerPanelOpen ? (
-              <>
-                <div className="popover-backdrop" onClick={onClosePeerPanel} aria-hidden="true" />
-                <div
-                  className="peer-popover"
-                  ref={peerPopoverRef}
-                  role="dialog"
-                  aria-label="连接详情"
-                  aria-modal="true"
-                  tabIndex={-1}
-                >
-                  <ul className="connection-metrics">
-                    <li>在线公钥: {peerCount}</li>
-                    <li>本地密钥版本: {localKeyVersions}</li>
-                    <li>待发送队列: {pendingQueueCount}</li>
-                    <li>失败待重试: {failedQueueCount}</li>
-                  </ul>
-                  {onlinePeers.length === 0 ? (
-                    <p>当前房间暂无在线设备</p>
-                  ) : (
-                    <ul>
-                      {onlinePeers.map((peer) => (
-                        <li key={peer.userId}>
-                          <span className="avatar-chip" style={{ background: avatarBackground(peer.userId) }}>
-                            {avatarGlyph(peer.username)}
-                          </span>
-                          <span className="peer-meta">
-                            {peer.username}
-                            <small>
-                              #{peer.userId}
-                              {peerSafetyNumbers[peer.userId]
-                                ? ` · Safety # ${peerSafetyNumbers[peer.userId]}`
-                                : ''}
-                            </small>
-                          </span>
-                        </li>
-                      ))}
+            {peerPanelOpen
+              ? createPortal(
+                <>
+                  <div className="popover-backdrop" onClick={onClosePeerPanel} aria-hidden="true" />
+                  <div
+                    className="peer-popover peer-popover-floating"
+                    ref={peerPopoverRef}
+                    role="dialog"
+                    aria-label="连接详情"
+                    aria-modal="true"
+                    tabIndex={-1}
+                    style={
+                      peerPopoverPosition
+                        ? {
+                            top: peerPopoverPosition.top,
+                            right: peerPopoverPosition.right,
+                            maxHeight: peerPopoverPosition.maxHeight,
+                          }
+                        : undefined
+                    }
+                  >
+                    <ul className="connection-metrics">
+                      <li>在线公钥: {peerCount}</li>
+                      <li>本地密钥版本: {localKeyVersions}</li>
+                      <li>待发送队列: {pendingQueueCount}</li>
+                      <li>失败待重试: {failedQueueCount}</li>
                     </ul>
-                  )}
-                </div>
-              </>
-            ) : null}
+                    {onlinePeers.length === 0 ? (
+                      <p>当前房间暂无在线设备</p>
+                    ) : (
+                      <ul>
+                        {onlinePeers.map((peer) => {
+                          const peerAddress = buildRecipientAddress(peer.userId, peer.deviceId);
+                          const safetyNumber = peerSafetyNumbers[peerAddress];
+                          return (
+                            <li key={peerAddress}>
+                              <span className="avatar-chip" style={{ background: avatarBackground(peer.userId) }}>
+                                {avatarGlyph(peer.username)}
+                              </span>
+                              <span className="peer-meta">
+                                {peer.username}
+                                <small>
+                                  #{peer.userId} · {peer.deviceName || peer.deviceId}
+                                  {safetyNumber
+                                    ? ` · Safety # ${safetyNumber}`
+                                    : ''}
+                                </small>
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                </>,
+                document.body
+              )
+              : null}
           </div>
         </header>
 

@@ -5,6 +5,7 @@ import type {
   SafetyNumberSnapshot,
   SignalPreKeyBundleList,
   User,
+  WrappedKey,
 } from './types';
 
 type LoginResponse = {
@@ -13,6 +14,11 @@ type LoginResponse = {
 };
 
 type SessionResponse = {
+  user: User;
+  device: DeviceSessionInfo;
+};
+
+export type AccountProfileResponse = {
   user: User;
   device: DeviceSessionInfo;
 };
@@ -110,6 +116,31 @@ type DeviceMutationResponse = {
   device: DeviceSnapshot;
   revoked?: boolean;
   forcedLogout?: boolean;
+};
+
+type DeviceEnvelopeRefillResponse = {
+  roomId: number;
+  deviceId: string;
+  messageIds: number[];
+};
+
+type DeviceEnvelopeRefillCommitResponse = {
+  ok: boolean;
+  roomId: number;
+  deviceId: string;
+  inserted: number;
+};
+
+export type DeviceSecretBackup = {
+  blobVersion: number;
+  kdfSalt: string;
+  recoveryHint: string;
+  encryptedBlob: Record<string, unknown>;
+  updatedAt?: string;
+};
+
+type DeviceSecretBackupResponse = {
+  backup: DeviceSecretBackup;
 };
 
 export type ApiErrorCode = 'timeout' | 'aborted' | 'network' | 'http';
@@ -347,6 +378,40 @@ export class ApiClient {
     return parseJSON<SessionResponse>(response);
   }
 
+  async updateProfile(username: string, options: ApiRequestOptions = {}): Promise<AccountProfileResponse> {
+    const response = await this.request(
+      '/api/account/profile',
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ username }),
+      },
+      options,
+    );
+    return parseJSON<AccountProfileResponse>(response);
+  }
+
+  async changePassword(
+    currentPassword: string,
+    newPassword: string,
+    options: ApiRequestOptions = {},
+  ): Promise<{ ok: boolean }> {
+    const response = await this.request(
+      '/api/account/password',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      },
+      options,
+    );
+    return parseJSON<{ ok: boolean }>(response);
+  }
+
   async listRooms(options: ApiRequestOptions = {}): Promise<RoomsResponse> {
     const response = await this.request('/api/rooms', {}, options);
     return parseJSON<RoomsResponse>(response);
@@ -492,10 +557,14 @@ export class ApiClient {
 
   async fetchSignalSafetyNumber(
     userID: number,
+    deviceID?: string,
     options: ApiRequestOptions = {},
   ): Promise<SafetyNumberSnapshot> {
+    const query = deviceID?.trim()
+      ? `?deviceId=${encodeURIComponent(deviceID.trim())}`
+      : '';
     const response = await this.request(
-      `/api/signal/safety-number/${userID}`,
+      `/api/signal/safety-number/${userID}${query}`,
       {},
       options,
     );
@@ -570,5 +639,76 @@ export class ApiClient {
       options,
     );
     return parseJSON<DeviceMutationResponse>(response);
+  }
+
+  async approveDevice(deviceID: string, options: ApiRequestOptions = {}): Promise<DeviceMutationResponse> {
+    const response = await this.request(
+      `/api/devices/${encodeURIComponent(deviceID)}/approve`,
+      {
+        method: 'POST',
+      },
+      options,
+    );
+    return parseJSON<DeviceMutationResponse>(response);
+  }
+
+  async requestDeviceEnvelopeRefill(
+    deviceID: string,
+    roomID: number,
+    messageIDs: number[],
+    options: ApiRequestOptions = {},
+  ): Promise<DeviceEnvelopeRefillResponse> {
+    const response = await this.request(
+      `/api/devices/${encodeURIComponent(deviceID)}/envelopes`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ roomId: roomID, messageIds: messageIDs }),
+      },
+      options,
+    );
+    return parseJSON<DeviceEnvelopeRefillResponse>(response);
+  }
+
+  async saveDeviceEnvelopeRefill(
+    deviceID: string,
+    roomID: number,
+    envelopes: Array<{ messageId: number; wrappedKey: WrappedKey }>,
+    options: ApiRequestOptions = {},
+  ): Promise<DeviceEnvelopeRefillCommitResponse> {
+    const response = await this.request(
+      `/api/devices/${encodeURIComponent(deviceID)}/envelopes/refill`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ roomId: roomID, envelopes }),
+      },
+      options,
+    );
+    return parseJSON<DeviceEnvelopeRefillCommitResponse>(response);
+  }
+
+  async fetchDeviceSecretBackup(options: ApiRequestOptions = {}): Promise<DeviceSecretBackupResponse> {
+    const response = await this.request('/api/device-secret', {}, options);
+    return parseJSON<DeviceSecretBackupResponse>(response);
+  }
+
+  async saveDeviceSecretBackup(backup: DeviceSecretBackup, options: ApiRequestOptions = {}): Promise<{ ok: boolean }> {
+    const response = await this.request(
+      '/api/device-secret',
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(backup),
+      },
+      options,
+    );
+    return parseJSON<{ ok: boolean }>(response);
   }
 }

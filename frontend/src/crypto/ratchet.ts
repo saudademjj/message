@@ -9,7 +9,6 @@ import {
   SIGNAL_X3DH_INFO,
 } from './constants';
 import {
-  consumeOneTimePreKey,
   findOneTimePreKey,
   findSignedPreKey,
 } from './identity';
@@ -23,6 +22,7 @@ import type {
   SignalPreKeyBundle,
 } from './types';
 import {
+  buildRecipientAddress,
   buildSessionID,
   canonicalSignedPreKeyPayload,
   concatBuffers,
@@ -30,6 +30,7 @@ import {
   ratchetKeyFingerprint,
   requireCryptoSupport,
   signingKeyFingerprint,
+  stableJSONStringify,
   toBase64,
   trimSkippedCache,
 } from './utils';
@@ -228,11 +229,29 @@ export async function ensureSelfSession(
     return existing;
   }
 
+  // Derive the self-session seed deterministically from the identity material
+  // so that a lost session record (e.g. partial IDB corruption that cleared
+  // the session store but kept the identity store) can be rebuilt and old
+  // self-encrypted ciphertext can still be decrypted on this device.
+  //
+  // Note: this seed is not portable across devices because it is derived from
+  // both the device-local active key id and the identity public material; a
+  // peer device cannot derive the same seed (which is the desired property —
+  // self-sessions are explicitly device-local).
   const selfDH = await generateRatchetKeyPair();
-  const seed = crypto.getRandomValues(new Uint8Array(32));
-  const seedRaw = seed.buffer.slice(seed.byteOffset, seed.byteOffset + seed.byteLength);
+  const selfSeedInput = new TextEncoder().encode(stableJSONStringify({
+    type: 'e2ee-chat-self-session-seed-v1',
+    userID: Math.floor(userID),
+    deviceID: localDeviceID,
+    identityPublicKeyJwk: identity.publicKeyJwk,
+    signingPublicKeyJwk: identity.signingPublicKeyJwk,
+  }));
+  const seedRaw = await crypto.subtle.digest('SHA-256', selfSeedInput);
   const rootRaw = await hkdf(seedRaw, new Uint8Array(32).buffer, DR_ROOT_INFO, 32);
-  const chainRaw = await hmacSha256(rootRaw, `${SIGNAL_INITIATOR_CHAIN_INFO}:${crypto.randomUUID()}`);
+  const chainRaw = await hmacSha256(
+    rootRaw,
+    `${SIGNAL_INITIATOR_CHAIN_INFO}:self:${Math.floor(userID)}:${localDeviceID}`,
+  );
 
   const session: RatchetSessionRecord = {
     id: buildSessionID(userID, localDeviceID, userID, localDeviceID),
@@ -318,7 +337,11 @@ async function applyDHRatchet(session: RatchetSessionRecord, nextRemoteDH: JsonW
   session.dhSendPublicJwk = nextDH.publicKeyJwk;
 }
 
-async function wrapContentKey(messageKey: ArrayBuffer, rawContentKey: ArrayBuffer): Promise<{ iv: string; wrappedKey: string }> {
+async function wrapContentKey(
+  messageKey: ArrayBuffer,
+  rawContentKey: ArrayBuffer,
+  recipientAAD: string,
+): Promise<{ iv: string; wrappedKey: string; recipientAad: string }> {
   const wrapIV = crypto.getRandomValues(new Uint8Array(12));
   const mk = await crypto.subtle.importKey(
     'raw',
@@ -328,24 +351,30 @@ async function wrapContentKey(messageKey: ArrayBuffer, rawContentKey: ArrayBuffe
     ['encrypt'],
   );
   const wrapped = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: wrapIV },
+    {
+      name: 'AES-GCM',
+      iv: wrapIV,
+      additionalData: new TextEncoder().encode(recipientAAD),
+    },
     mk,
     rawContentKey,
   );
   return {
     iv: toBase64(wrapIV),
     wrappedKey: toBase64(wrapped),
+    recipientAad: recipientAAD,
   };
 }
 
 function buildWrappedKeyHeader(
   session: RatchetSessionRecord,
-  wrapped: { iv: string; wrappedKey: string },
+  wrapped: { iv: string; wrappedKey: string; recipientAad: string },
 ): WrappedKey {
   const preKeyMessage = session.pendingPreKey;
   return {
     iv: wrapped.iv,
     wrappedKey: wrapped.wrappedKey,
+    recipientAad: wrapped.recipientAad,
     ratchetDhPublicKeyJwk: session.dhSendPublicJwk,
     messageNumber: session.sendCount,
     previousChainLength: session.previousSendCount,
@@ -368,7 +397,11 @@ export async function prepareSendWrappedKey(
   rawContentKey: ArrayBuffer,
 ): Promise<WrappedKey> {
   const { nextChainKey, messageKey } = await kdfCK(session.sendChainKey);
-  const wrapped = await wrapContentKey(messageKey, rawContentKey);
+  const wrapped = await wrapContentKey(
+    messageKey,
+    rawContentKey,
+    buildRecipientAddress(session.peerUserID, session.peerDeviceID),
+  );
   const payload = buildWrappedKeyHeader(session, wrapped);
   session.sendChainKey = nextChainKey;
   session.sendCount += 1;
@@ -468,6 +501,11 @@ async function createInitiatorSession(
   };
 }
 
+function sessionMatchesBundle(session: RatchetSessionRecord, bundle: SignalPreKeyBundle): boolean {
+  return signingKeyFingerprint(session.peerIdentityPublicKeyJwk) === signingKeyFingerprint(bundle.identityKeyJwk)
+    && signingKeyFingerprint(session.peerIdentitySigningPublicKeyJwk) === signingKeyFingerprint(bundle.identitySigningPublicKeyJwk);
+}
+
 export async function bootstrapSessionFromPreKeyMessage(
   localUserID: number,
   localDeviceID: string,
@@ -487,10 +525,6 @@ export async function bootstrapSessionFromPreKeyMessage(
     Math.floor(header.signedPreKeyId),
     header.oneTimePreKeyId == null ? null : Math.floor(header.oneTimePreKeyId),
   );
-
-  if (header.oneTimePreKeyId != null) {
-    await consumeOneTimePreKey(identity, Math.floor(header.oneTimePreKeyId));
-  }
 
   const localSignedPreKey = findSignedPreKey(identity, Math.floor(header.signedPreKeyId));
   if (!localSignedPreKey) {
@@ -521,7 +555,6 @@ export async function bootstrapSessionFromPreKeyMessage(
     isSelfSession: false,
     updatedAt: new Date().toISOString(),
   };
-  await writeSession(session);
   return session;
 }
 
@@ -545,7 +578,10 @@ export async function ensureRatchetSessionsForRecipients(
       await ensureSelfSession(localUserID, localDeviceID, identity);
       readyRecipients.push({ userID: localUserID, deviceID: localDeviceID });
       try {
-        const localBundleList = await resolveSignalBundle(localUserID);
+      const localBundleList = await resolveSignalBundle(localUserID);
+        if (localBundleList.devices.some((bundle) => bundle.oneTimePreKeyLow)) {
+          console.warn('[ratchet] local one-time prekey pool is low; publishing a replenished bundle will be attempted by the key rotation loop');
+        }
         const localDeviceBundles = localBundleList.devices.filter((bundle) => {
           if (typeof bundle.deviceId !== 'string') {
             return false;
@@ -558,7 +594,7 @@ export async function ensureRatchetSessionsForRecipients(
           const peerDeviceID = bundle.deviceId.trim();
           try {
             const existing = await readSession(localUserID, localDeviceID, localUserID, peerDeviceID);
-            if (existing?.status === 'ready') {
+            if (existing?.status === 'ready' && sessionMatchesBundle(existing, bundle)) {
               readyRecipients.push({ userID: localUserID, deviceID: peerDeviceID });
               localPeerReady += 1;
               continue;
@@ -578,19 +614,49 @@ export async function ensureRatchetSessionsForRecipients(
             console.warn(`[ratchet] failed to establish self-device session ${peerDeviceID}:`, err);
           }
         }
-        if (localDeviceBundles.length > 0 && localPeerReady === 0) {
+        const localReadyDeviceCount = Number.isFinite(localBundleList.readyDeviceCount)
+          ? Math.max(0, Math.floor(localBundleList.readyDeviceCount))
+          : localBundleList.devices.length;
+        const localActiveDeviceCount = Number.isFinite(localBundleList.activeDeviceCount)
+          ? Math.max(0, Math.floor(localBundleList.activeDeviceCount))
+          : localReadyDeviceCount;
+        const localMissingDeviceCount = Number.isFinite(localBundleList.missingDeviceCount)
+          ? Math.max(0, Math.floor(localBundleList.missingDeviceCount))
+          : Math.max(0, localActiveDeviceCount - localReadyDeviceCount);
+        if (
+          localMissingDeviceCount > 0
+          || localReadyDeviceCount < localActiveDeviceCount
+          || localPeerReady !== localDeviceBundles.length
+        ) {
           pendingUserIDs.push(localUserID);
         }
       } catch (err) {
         console.warn('[ratchet] failed to load local prekey bundles:', err);
+        pendingUserIDs.push(localUserID);
       }
       continue;
     }
 
     try {
       const bundleList = await resolveSignalBundle(peerUserID);
+      for (const bundle of bundleList.devices) {
+        if (!bundle.oneTimePreKey) {
+          console.warn(`[ratchet] peer ${peerUserID}:${bundle.deviceId} has no one-time prekey; X3DH forward secrecy is degraded for this initial session`);
+        } else if (bundle.oneTimePreKeyLow) {
+          console.warn(`[ratchet] peer ${peerUserID}:${bundle.deviceId} one-time prekey pool is low (${bundle.oneTimePreKeysLeft ?? 0} left)`);
+        }
+      }
       const deviceBundles = bundleList.devices.filter((bundle) => typeof bundle.deviceId === 'string' && bundle.deviceId.trim());
-      if (deviceBundles.length === 0) {
+      const readyDeviceCount = Number.isFinite(bundleList.readyDeviceCount)
+        ? Math.max(0, Math.floor(bundleList.readyDeviceCount))
+        : deviceBundles.length;
+      const activeDeviceCount = Number.isFinite(bundleList.activeDeviceCount)
+        ? Math.max(0, Math.floor(bundleList.activeDeviceCount))
+        : readyDeviceCount;
+      const missingDeviceCount = Number.isFinite(bundleList.missingDeviceCount)
+        ? Math.max(0, Math.floor(bundleList.missingDeviceCount))
+        : Math.max(0, activeDeviceCount - readyDeviceCount);
+      if (deviceBundles.length === 0 || missingDeviceCount > 0 || readyDeviceCount < activeDeviceCount) {
         pendingUserIDs.push(peerUserID);
         continue;
       }
@@ -599,7 +665,7 @@ export async function ensureRatchetSessionsForRecipients(
       for (const bundle of deviceBundles) {
         const peerDeviceID = bundle.deviceId.trim();
         const existing = await readSession(localUserID, localDeviceID, peerUserID, peerDeviceID);
-        if (existing?.status === 'ready') {
+        if (existing?.status === 'ready' && sessionMatchesBundle(existing, bundle)) {
           userReady.push({ userID: peerUserID, deviceID: peerDeviceID });
           continue;
         }

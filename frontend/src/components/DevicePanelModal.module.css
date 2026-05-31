@@ -1,0 +1,210 @@
+.shell {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  border: none;
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.card {
+  z-index: 1;
+  width: min(760px, 100%);
+  max-height: calc(100dvh - 40px);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 18px;
+  padding: 24px;
+  overflow: hidden;
+}
+
+.head,
+.headActions,
+.deviceHead,
+.badges,
+.actions {
+  display: flex;
+  align-items: center;
+}
+
+.head {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.headActions {
+  gap: 8px;
+}
+
+.close {
+  min-height: 34px;
+  padding: 8px 14px;
+}
+
+.emptyState {
+  margin: 0;
+  padding: 16px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+}
+
+.recoveryBox {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.recoveryBox h4 {
+  margin: 0 0 4px;
+}
+
+.recoveryBox p {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.recoveryActions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.recoveryActions input {
+  flex: 1;
+  min-width: 0;
+}
+
+.deviceList {
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.deviceItem {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-strong);
+}
+
+.deviceHead {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.badges {
+  gap: 8px;
+}
+
+.currentBadge,
+.activeBadge,
+.revokedBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: var(--radius-full);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.currentBadge {
+  background: var(--accent-primary-ghost);
+  color: var(--accent-primary);
+}
+
+.activeBadge {
+  background: rgba(34, 197, 94, 0.12);
+  color: #16a34a;
+}
+
+.revokedBadge {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--danger);
+}
+
+.meta {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.meta div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.meta dt {
+  color: var(--text-tertiary);
+}
+
+.meta dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  gap: 8px;
+  align-items: end;
+}
+
+.actions label {
+  flex: 1;
+}
+
+.actions button {
+  min-height: 42px;
+  white-space: nowrap;
+}
+
+.danger {
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+@media (max-width: 720px) {
+  .shell {
+    padding: 10px;
+  }
+
+  .card {
+    max-height: calc(100dvh - 20px);
+  }
+
+  .deviceHead,
+  .actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .badges {
+    align-self: flex-start;
+  }
+}

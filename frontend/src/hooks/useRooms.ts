@@ -3,7 +3,7 @@ import type { NavigateFunction } from 'react-router-dom';
 import { ApiError, type ApiClient } from '../api';
 import { INVITE_QUERY_KEY, clearInviteTokenFromLocation, extractInviteTokenFromInput, parseInviteTokenFromLocation } from '../app/helpers';
 import { useChatStore } from '../stores/chatStore';
-import type { Room } from '../types';
+import type { Room, User } from '../types';
 import type { AuthSession } from '../contexts/AuthContext';
 
 type UseRoomsArgs = {
@@ -25,12 +25,12 @@ type UseRoomsResult = {
   rooms: Room[];
   selectedRoomID: number | null;
   selectedRoom: Room | null;
-  roomMembers: { id: number; username: string; role: 'admin' | 'user' }[];
+  roomMembers: User[];
   setSelectedRoomID: (roomID: number | null | ((previous: number | null) => number | null)) => void;
   setRoomMembers: (
     next:
-      | { id: number; username: string; role: 'admin' | 'user' }[]
-      | ((previous: { id: number; username: string; role: 'admin' | 'user' }[]) => { id: number; username: string; role: 'admin' | 'user' }[]),
+      | User[]
+      | ((previous: User[]) => User[]),
   ) => void;
   refreshRooms: (signal?: AbortSignal) => Promise<void>;
   filteredRooms: Room[];
@@ -79,7 +79,22 @@ export function useRooms({
   const [newRoomName, setNewRoomName] = useState('');
   const [joinRoomID, setJoinRoomID] = useState('');
   const [pendingInviteToken, setPendingInviteToken] = useState<string | null>(parseInviteTokenFromLocation);
+  const [roomMembersRoomID, setRoomMembersRoomID] = useState<number | null>(null);
   const inviteJoiningRef = useRef(false);
+
+  const activeRoomMembers = useMemo(
+    () => roomMembersRoomID === selectedRoomID ? roomMembers : [],
+    [roomMembers, roomMembersRoomID, selectedRoomID],
+  );
+
+  const setSelectedRoomMembers = useCallback((
+    next:
+      | User[]
+      | ((previous: User[]) => User[]),
+  ) => {
+    setRoomMembers(next);
+    setRoomMembersRoomID(selectedRoomID);
+  }, [selectedRoomID, setRoomMembers]);
 
   const selectedRoom = useMemo(
     () => rooms.find((room) => room.id === selectedRoomID) ?? null,
@@ -132,6 +147,7 @@ export function useRooms({
     if (!auth) {
       setRooms([]);
       setRoomMembers([]);
+      setRoomMembersRoomID(null);
       setSelectedRoomID(null);
       setRoomListQuery('');
       setRoomModalOpen(false);
@@ -233,14 +249,18 @@ export function useRooms({
   useEffect(() => {
     if (!auth || !selectedRoomID) {
       setRoomMembers([]);
+      setRoomMembersRoomID(null);
       return;
     }
+    setRoomMembers([]);
+    setRoomMembersRoomID(null);
     const controller = new AbortController();
     let cancelled = false;
     api.listRoomMembers(selectedRoomID, { signal: controller.signal })
       .then((result) => {
         if (!cancelled) {
           setRoomMembers(result.members);
+          setRoomMembersRoomID(result.roomId);
         }
       })
       .catch((reason: unknown) => {
@@ -410,9 +430,9 @@ export function useRooms({
     rooms,
     selectedRoomID,
     selectedRoom,
-    roomMembers,
+    roomMembers: activeRoomMembers,
     setSelectedRoomID,
-    setRoomMembers,
+    setRoomMembers: setSelectedRoomMembers,
     refreshRooms,
     filteredRooms,
     roomListQuery,

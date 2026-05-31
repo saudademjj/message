@@ -21,6 +21,8 @@ type MessageRecord = {
   createdAt: string;
   iv: string;
   ciphertext: string;
+  contentKeyIv?: string;
+  contentKeyCiphertext?: string;
   storedAt: string;
 };
 
@@ -65,9 +67,22 @@ function buildMessageRecordID(userID: number, messageID: number): string {
   return `${userID}:${messageID}`;
 }
 
+function buildSignatureRecordID(userID: number, roomID: number, signature: string): string {
+  return `${userID}:sig:${roomID}:${signature}`;
+}
+
 function buildAAD(userID: number, message: MessageSnapshot): ArrayBuffer {
   const encoded = encoder.encode(
     `${userID}|${message.id}|${message.roomId}|${message.senderId}|${message.createdAt}`,
+  );
+  const copy = new Uint8Array(encoded.byteLength);
+  copy.set(encoded);
+  return copy.buffer;
+}
+
+function buildContentKeyAAD(userID: number, message: MessageSnapshot): ArrayBuffer {
+  const encoded = encoder.encode(
+    `${userID}|${message.id}|${message.roomId}|${message.senderId}|${message.createdAt}|content-key`,
   );
   const copy = new Uint8Array(encoded.byteLength);
   copy.set(encoded);
@@ -99,6 +114,8 @@ function normalizeMessageRecord(raw: unknown): MessageRecord | null {
     createdAt: raw.createdAt,
     iv: raw.iv,
     ciphertext: raw.ciphertext,
+    contentKeyIv: typeof raw.contentKeyIv === 'string' ? raw.contentKeyIv : undefined,
+    contentKeyCiphertext: typeof raw.contentKeyCiphertext === 'string' ? raw.contentKeyCiphertext : undefined,
     storedAt: typeof raw.storedAt === 'string' ? raw.storedAt : new Date().toISOString(),
   };
 }
@@ -357,6 +374,7 @@ export async function persistDecryptedPlaintext(
   userID: number,
   message: MessageSnapshot,
   plaintext: string,
+  rawContentKey?: ArrayBuffer,
 ): Promise<void> {
   if (!hasSecureStoreSupport()) {
     return;
@@ -386,6 +404,23 @@ export async function persistDecryptedPlaintext(
     encoder.encode(plaintext),
   );
 
+  let contentKeyIv: string | undefined;
+  let contentKeyCiphertext: string | undefined;
+  if (rawContentKey && rawContentKey.byteLength > 0) {
+    const keyIV = crypto.getRandomValues(new Uint8Array(12));
+    const encryptedContentKey = await crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: keyIV,
+        additionalData: buildContentKeyAAD(userID, normalized),
+      },
+      key,
+      rawContentKey,
+    );
+    contentKeyIv = toBase64(keyIV);
+    contentKeyCiphertext = toBase64(encryptedContentKey);
+  }
+
   await writeMessageRecord({
     id: buildMessageRecordID(userID, normalized.id),
     userID,
@@ -395,6 +430,56 @@ export async function persistDecryptedPlaintext(
     createdAt: normalized.createdAt,
     iv: toBase64(iv),
     ciphertext: toBase64(encrypted),
+    contentKeyIv,
+    contentKeyCiphertext,
+    storedAt: new Date().toISOString(),
+  });
+}
+
+export async function persistOutgoingContentKey(
+  userID: number,
+  roomID: number,
+  signature: string,
+  rawContentKey: ArrayBuffer,
+): Promise<void> {
+  if (!hasSecureStoreSupport() || !isValidPositiveInt(userID) || !isValidPositiveInt(roomID)) {
+    return;
+  }
+  const normalizedSignature = signature.trim();
+  if (!normalizedSignature || rawContentKey.byteLength === 0) {
+    return;
+  }
+  const key = await getUserMessageKey(userID, true);
+  if (!key) {
+    return;
+  }
+  const snapshot = {
+    id: 1,
+    roomId: roomID,
+    senderId: userID,
+    createdAt: normalizedSignature,
+  };
+  const keyIV = crypto.getRandomValues(new Uint8Array(12));
+  const encryptedContentKey = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: keyIV,
+      additionalData: buildContentKeyAAD(userID, snapshot),
+    },
+    key,
+    rawContentKey,
+  );
+  await writeMessageRecord({
+    id: buildSignatureRecordID(userID, roomID, normalizedSignature),
+    userID,
+    roomID,
+    messageID: 0,
+    senderID: userID,
+    createdAt: normalizedSignature,
+    iv: '',
+    ciphertext: '',
+    contentKeyIv: toBase64(keyIV),
+    contentKeyCiphertext: toBase64(encryptedContentKey),
     storedAt: new Date().toISOString(),
   });
 }
@@ -443,4 +528,105 @@ export async function loadCachedPlaintexts(
     }
   }
   return plaintexts;
+}
+
+export async function loadCachedContentKeys(
+  userID: number,
+  messages: MessageSnapshot[],
+): Promise<Map<number, ArrayBuffer>> {
+  const contentKeys = new Map<number, ArrayBuffer>();
+  if (!hasSecureStoreSupport()) {
+    return contentKeys;
+  }
+  if (!isValidPositiveInt(userID)) {
+    return contentKeys;
+  }
+
+  const normalized = normalizeMessages(messages);
+  if (normalized.length === 0) {
+    return contentKeys;
+  }
+
+  const key = await getUserMessageKey(userID, false);
+  if (!key) {
+    return contentKeys;
+  }
+
+  const records = await readMessageRecords(userID, normalized.map((message) => message.id));
+  for (const message of normalized) {
+    const record = records.get(message.id);
+    if (!record?.contentKeyIv || !record.contentKeyCiphertext) {
+      continue;
+    }
+    try {
+      const decrypted = await crypto.subtle.decrypt(
+        {
+          name: 'AES-GCM',
+          iv: fromBase64(record.contentKeyIv),
+          additionalData: buildContentKeyAAD(userID, message),
+        },
+        key,
+        fromBase64(record.contentKeyCiphertext),
+      );
+      contentKeys.set(message.id, decrypted);
+    } catch {
+      // Skip corrupted or mismatched cache records.
+    }
+  }
+  return contentKeys;
+}
+
+export async function loadOutgoingContentKey(
+  userID: number,
+  roomID: number,
+  signature: string,
+): Promise<ArrayBuffer | null> {
+  if (!hasSecureStoreSupport() || !isValidPositiveInt(userID) || !isValidPositiveInt(roomID)) {
+    return null;
+  }
+  const normalizedSignature = signature.trim();
+  if (!normalizedSignature) {
+    return null;
+  }
+  const key = await getUserMessageKey(userID, false);
+  if (!key) {
+    return null;
+  }
+  let db: IDBDatabase;
+  try {
+    db = await openMessageDB();
+  } catch {
+    return null;
+  }
+  try {
+    const raw = await new Promise<unknown>((resolve, reject) => {
+      const tx = db.transaction(MESSAGE_STORE, 'readonly');
+      const request = tx.objectStore(MESSAGE_STORE).get(buildSignatureRecordID(userID, roomID, normalizedSignature));
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error('failed to read local content key'));
+    });
+    const record = normalizeMessageRecord(raw);
+    if (!record?.contentKeyIv || !record.contentKeyCiphertext) {
+      return null;
+    }
+    const snapshot = {
+      id: 1,
+      roomId: roomID,
+      senderId: userID,
+      createdAt: normalizedSignature,
+    };
+    return await crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: fromBase64(record.contentKeyIv),
+        additionalData: buildContentKeyAAD(userID, snapshot),
+      },
+      key,
+      fromBase64(record.contentKeyCiphertext),
+    );
+  } catch {
+    return null;
+  } finally {
+    db.close();
+  }
 }

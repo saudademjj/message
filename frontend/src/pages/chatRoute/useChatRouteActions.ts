@@ -12,7 +12,7 @@ type UseChatRouteActionsArgs = {
   disconnect: (reason?: string) => void;
   logout: () => void;
   resetSessionScopedState: () => void;
-  clearQueue: () => void;
+  clearQueue: (roomID?: number) => void;
   setNewManagedUsername: Dispatch<SetStateAction<string>>;
   setNewManagedPassword: Dispatch<SetStateAction<string>>;
   setAdminModalOpen: Dispatch<SetStateAction<boolean>>;
@@ -135,9 +135,9 @@ export function useChatRouteActions({
 
   const handleDeleteRoomWrapper = useCallback(() => {
     void roomsController.handleDeleteRoom().then(() => {
-      clearQueue();
+      clearQueue(selectedRoomID ?? undefined);
     });
-  }, [clearQueue, roomsController]);
+  }, [clearQueue, roomsController, selectedRoomID]);
 
   const handleEnableNotificationsWrapper = useCallback(() => {
     void handleEnableNotifications();

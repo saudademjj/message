@@ -11,6 +11,7 @@ export type {
 export {
   loadOrCreateIdentity,
   loadOrCreateIdentityForDevice,
+  replenishOneTimePreKeysIfNeeded,
   rotateIdentityIfNeeded,
   toSignalPreKeyBundleUpload,
 } from './identity';
@@ -18,10 +19,14 @@ export {
 export {
   ensureRatchetSessionsForRecipients,
   resetRatchetSession,
+  ensureSelfSession,
 } from './ratchet';
 
 export {
   signDecryptAck,
   encryptForRecipients,
+  encryptForRecipientsWithContentKey,
   decryptPayload,
+  decryptPayloadWithContentKey,
+  wrapContentKeyForRecipient,
 } from './encrypt';

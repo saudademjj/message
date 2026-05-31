@@ -16,6 +16,10 @@ export const SIGNAL_INITIATOR_CHAIN_INFO = 'signal-chain-initiator-v1';
 export const SIGNAL_RESPONDER_CHAIN_INFO = 'signal-chain-responder-v1';
 
 export const DEFAULT_KEY_MAX_AGE_MS = 4 * 60 * 60 * 1000;
-export const DEFAULT_KEY_HISTORY_LIMIT = 6;
-export const SIGNED_PREKEY_HISTORY_LIMIT = 5;
+export const DEFAULT_KEY_HISTORY_LIMIT = 12;
+// Keep enough rotated signed prekeys around so that responders can still
+// derive the X3DH master secret if a peer raced the rotation. Each rotation
+// happens at most every DEFAULT_KEY_MAX_AGE_MS, so 12 entries cover ~48h of
+// in-flight prekey messages even under aggressive rotation.
+export const SIGNED_PREKEY_HISTORY_LIMIT = 12;
 export const ONE_TIME_PREKEY_TARGET = 96;

@@ -7,6 +7,7 @@ import type { AuthSession } from '../../contexts/AuthContext';
 import { useMessages } from '../../hooks/useMessages';
 import { useRooms } from '../../hooks/useRooms';
 import { useSendQueue } from '../../hooks/useSendQueue';
+import { useDevices } from '../../hooks/useDevices';
 import type { QuoteReplyPayload } from '../../components/ChatTimeline';
 import type { Peer } from '../../types';
 
@@ -106,11 +107,9 @@ export function useChatRouteDataControllers({
     reportError,
     setError,
     setInfo,
+    authUsername: auth?.user.username ?? '',
   });
-  const { clearQueue } = sendQueueController;
-
   const handleRoomSwitch = useCallback(() => {
-    clearQueue();
     setPeerPanelOpen(false);
     setReplyTarget(null);
     setDraft('');
@@ -118,7 +117,7 @@ export function useChatRouteDataControllers({
       window.clearTimeout(typingIdleTimerRef.current);
       typingIdleTimerRef.current = null;
     }
-  }, [clearQueue, setDraft, setPeerPanelOpen, setReplyTarget, typingIdleTimerRef]);
+  }, [setDraft, setPeerPanelOpen, setReplyTarget, typingIdleTimerRef]);
 
   const messagesController = useMessages({
     api,
@@ -143,9 +142,19 @@ export function useChatRouteDataControllers({
     onRoomSwitch: handleRoomSwitch,
   });
 
+  const devicesController = useDevices({
+    api,
+    auth,
+    selectedRoomID: roomsController.selectedRoomID,
+    sendJSON,
+    reportError,
+    setInfo,
+  });
+
   return {
     roomsController,
     sendQueueController,
     messagesController,
+    devicesController,
   };
 }

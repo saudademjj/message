@@ -3,13 +3,14 @@ import { Navigate, Route, Routes, useParams } from 'react-router-dom';
 import { ApiClient } from './api';
 import { AuthProvider } from './contexts/AuthContext';
 import { CryptoProvider } from './contexts/CryptoContext';
+import { RoomSummaryProvider } from './contexts/RoomSummaryContext';
 import { WebSocketProvider } from './contexts/WebSocketContext';
 import { ChatRoutePage } from './pages/ChatRoutePage';
 import { LoginRoutePage } from './pages/LoginRoutePage';
 import './App.css';
 
 const API_BASE =
-  import.meta.env.VITE_API_BASE ?? window.location.origin;
+  import.meta.env.VITE_API_BASE || window.location.origin;
 
 function App() {
   const api = useMemo(() => new ApiClient(API_BASE), []);
@@ -32,16 +33,18 @@ function App() {
 
   return (
     <AuthProvider api={api}>
-      <CryptoProvider>
-        <WebSocketProvider api={api} apiBase={API_BASE}>
-          <Routes>
-            <Route path="/login" element={<LoginRouteView />} />
-            <Route path="/chat" element={<ChatRouteView />} />
-            <Route path="/chat/:roomId" element={<ChatRouteView />} />
-            <Route path="/admin" element={<AdminRouteView />} />
-            <Route path="*" element={<Navigate to="/login" replace />} />
-          </Routes>
-        </WebSocketProvider>
+      <CryptoProvider api={api}>
+        <RoomSummaryProvider api={api} apiBase={API_BASE}>
+          <WebSocketProvider api={api} apiBase={API_BASE}>
+            <Routes>
+              <Route path="/login" element={<LoginRouteView />} />
+              <Route path="/chat" element={<ChatRouteView />} />
+              <Route path="/chat/:roomId" element={<ChatRouteView />} />
+              <Route path="/admin" element={<AdminRouteView />} />
+              <Route path="*" element={<Navigate to="/login" replace />} />
+            </Routes>
+          </WebSocketProvider>
+        </RoomSummaryProvider>
       </CryptoProvider>
     </AuthProvider>
   );

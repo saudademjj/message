@@ -5,6 +5,7 @@ import {
   ensureSelfSession,
   prepareSendWrappedKey,
 } from './ratchet';
+import { consumeOneTimePreKey } from './identity';
 import { readSession, writeSession } from './store';
 import type { Identity } from './types';
 import {
@@ -68,7 +69,11 @@ async function verifyCipherPayloadSignature(payload: CipherPayload): Promise<boo
   );
 }
 
-async function unwrapContentKey(messageKey: ArrayBuffer, wrapped: WrappedKey): Promise<ArrayBuffer> {
+async function unwrapContentKey(
+  messageKey: ArrayBuffer,
+  wrapped: WrappedKey,
+  expectedRecipientAAD: string,
+): Promise<ArrayBuffer> {
   const mk = await crypto.subtle.importKey(
     'raw',
     messageKey,
@@ -76,20 +81,32 @@ async function unwrapContentKey(messageKey: ArrayBuffer, wrapped: WrappedKey): P
     false,
     ['decrypt'],
   );
-  return crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: fromBase64(wrapped.iv) },
-    mk,
-    fromBase64(wrapped.wrappedKey),
-  );
+  const encrypted = fromBase64(wrapped.wrappedKey);
+  const iv = fromBase64(wrapped.iv);
+  if (typeof wrapped.recipientAad === 'string' && wrapped.recipientAad.trim()) {
+    if (wrapped.recipientAad !== expectedRecipientAAD) {
+      throw new Error('wrapped key recipient binding mismatch');
+    }
+    return crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv,
+        additionalData: new TextEncoder().encode(expectedRecipientAAD),
+      },
+      mk,
+      encrypted,
+    );
+  }
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv }, mk, encrypted);
 }
 
-export async function encryptForRecipients(
+export async function encryptForRecipientsWithContentKey(
   plaintext: string,
   senderUserID: number,
   senderDeviceID: string,
   identity: Identity,
   recipients: RecipientAddress[],
-): Promise<CipherPayload> {
+): Promise<{ payload: CipherPayload; rawContentKey: ArrayBuffer }> {
   requireCryptoSupport();
   if (!plaintext.trim()) {
     throw new Error('message cannot be empty');
@@ -106,7 +123,7 @@ export async function encryptForRecipients(
     messageKey,
     new TextEncoder().encode(plaintext),
   );
-  const rawMessageKey = await crypto.subtle.exportKey('raw', messageKey);
+  const rawContentKey = await crypto.subtle.exportKey('raw', messageKey);
 
   const wrappedKeys: Record<string, WrappedKey> = {};
   const missingRecipients: string[] = [];
@@ -125,7 +142,7 @@ export async function encryptForRecipients(
       continue;
     }
 
-    const wrapped = await prepareSendWrappedKey(session, rawMessageKey);
+    const wrapped = await prepareSendWrappedKey(session, rawContentKey);
     wrappedKeys[buildRecipientAddress(numericRecipient, recipientDeviceID)] = wrapped;
     await writeSession(session);
   }
@@ -140,7 +157,7 @@ export async function encryptForRecipients(
   }
 
   const unsignedPayload: CipherPayload = {
-    version: 3,
+    version: 4,
     ciphertext: toBase64(ciphertext),
     messageIv: toBase64(messageIV),
     wrappedKeys,
@@ -152,9 +169,29 @@ export async function encryptForRecipients(
   };
   const signature = await signCipherPayload(unsignedPayload, identity.signingPrivateKey);
   return {
-    ...unsignedPayload,
-    signature,
+    payload: {
+      ...unsignedPayload,
+      signature,
+    },
+    rawContentKey,
   };
+}
+
+export async function encryptForRecipients(
+  plaintext: string,
+  senderUserID: number,
+  senderDeviceID: string,
+  identity: Identity,
+  recipients: RecipientAddress[],
+): Promise<CipherPayload> {
+  const result = await encryptForRecipientsWithContentKey(
+    plaintext,
+    senderUserID,
+    senderDeviceID,
+    identity,
+    recipients,
+  );
+  return result.payload;
 }
 
 export async function decryptPayload(
@@ -165,6 +202,25 @@ export async function decryptPayload(
   senderDeviceID: string,
   identity: Identity,
 ): Promise<string> {
+  const result = await decryptPayloadWithContentKey(
+    payload,
+    localUserID,
+    localDeviceID,
+    senderUserID,
+    senderDeviceID,
+    identity,
+  );
+  return result.plaintext;
+}
+
+export async function decryptPayloadWithContentKey(
+  payload: CipherPayload,
+  localUserID: number,
+  localDeviceID: string,
+  senderUserID: number,
+  senderDeviceID: string,
+  identity: Identity,
+): Promise<{ plaintext: string; rawContentKey: ArrayBuffer }> {
   requireCryptoSupport();
 
   if (!payload.senderSigningPublicKeyJwk || !payload.signature) {
@@ -178,7 +234,8 @@ export async function decryptPayload(
     }
   }
 
-  const wrapped = payload.wrappedKeys[buildRecipientAddress(localUserID, localDeviceID)];
+  const recipientAddress = buildRecipientAddress(localUserID, localDeviceID);
+  const wrapped = payload.wrappedKeys[recipientAddress];
   if (!wrapped) {
     throw new Error('no wrapped key for this user');
   }
@@ -221,24 +278,21 @@ export async function decryptPayload(
     }
   }
   if (isLocalSelfSender && payload.senderSigningPublicKeyJwk && signingKeyFingerprint(payload.senderSigningPublicKeyJwk) !== signingKeyFingerprint(identity.signingPublicKeyJwk)) {
-    // Warn but don't throw: recovery payloads or key migrations may carry a stale signing key
     console.warn('[decrypt] local signing key fingerprint mismatch – proceeding with caution');
   }
 
-  const decryptWithSession = async (targetSession: NonNullable<typeof session>): Promise<ArrayBuffer> => {
+  const unwrapWithSession = async (targetSession: NonNullable<typeof session>): Promise<ArrayBuffer> => {
     const messageKey = await deriveRatchetMessageKey(targetSession, wrapped);
-    const rawContentKey = await unwrapContentKey(messageKey, wrapped);
-    await writeSession(targetSession);
-    return rawContentKey;
+    return unwrapContentKey(messageKey, wrapped, recipientAddress);
   };
 
   let rawContentKey: ArrayBuffer;
+  let sessionToCommit: NonNullable<typeof session> | null = null;
   try {
     const sessionCopy = { ...session, skipped: { ...session.skipped } };
-    rawContentKey = await decryptWithSession(sessionCopy);
+    rawContentKey = await unwrapWithSession(sessionCopy);
+    sessionToCommit = sessionCopy;
   } catch (primaryReason) {
-    // Recovery payloads and forced rekey payloads may carry pre-key headers that should
-    // bootstrap a fresh session if the local state is stale.
     if (!isLocalSelfSender && wrapped.preKeyMessage) {
       try {
         const bootstrapSession = await bootstrapSessionFromPreKeyMessage(
@@ -249,7 +303,8 @@ export async function decryptPayload(
           identity,
           wrapped,
         );
-        rawContentKey = await decryptWithSession(bootstrapSession);
+        rawContentKey = await unwrapWithSession(bootstrapSession);
+        sessionToCommit = bootstrapSession;
       } catch {
         throw primaryReason;
       }
@@ -265,11 +320,45 @@ export async function decryptPayload(
     false,
     ['decrypt'],
   );
-
   const plaintext = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: fromBase64(payload.messageIv) },
     contentKey,
     fromBase64(payload.ciphertext),
   );
-  return new TextDecoder().decode(plaintext);
+  if (sessionToCommit) {
+    await writeSession(sessionToCommit);
+    if (!isLocalSelfSender && wrapped.preKeyMessage?.oneTimePreKeyId != null) {
+      await consumeOneTimePreKey(identity, Math.floor(wrapped.preKeyMessage.oneTimePreKeyId));
+    }
+  }
+  return {
+    plaintext: new TextDecoder().decode(plaintext),
+    rawContentKey,
+  };
+}
+
+export async function wrapContentKeyForRecipient(
+  senderUserID: number,
+  senderDeviceID: string,
+  identity: Identity,
+  recipient: RecipientAddress,
+  rawContentKey: ArrayBuffer,
+): Promise<WrappedKey> {
+  requireCryptoSupport();
+  const numericRecipient = Number(recipient.userID);
+  const recipientDeviceID = typeof recipient.deviceID === 'string' ? recipient.deviceID.trim() : '';
+  if (!Number.isFinite(numericRecipient) || numericRecipient <= 0 || !recipientDeviceID) {
+    throw new Error('invalid envelope recipient');
+  }
+
+  const session = numericRecipient === senderUserID && recipientDeviceID === senderDeviceID
+    ? await ensureSelfSession(senderUserID, senderDeviceID, identity)
+    : await readSession(senderUserID, senderDeviceID, numericRecipient, recipientDeviceID);
+  if (!session || session.status !== 'ready') {
+    throw new Error(`missing ready ratchet session for recipient ${buildRecipientAddress(numericRecipient, recipientDeviceID)}`);
+  }
+
+  const wrapped = await prepareSendWrappedKey(session, rawContentKey);
+  await writeSession(session);
+  return wrapped;
 }

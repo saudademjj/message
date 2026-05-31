@@ -11,11 +11,15 @@ type UseChatRouteEffectsArgs = {
   peerPopoverRef: RefObject<HTMLDivElement | null>;
   roomModalCardRef: RefObject<HTMLElement | null>;
   adminModalCardRef: RefObject<HTMLElement | null>;
+  deviceModalCardRef: RefObject<HTMLElement | null>;
+  profileModalCardRef: RefObject<HTMLElement | null>;
   sidebarOpen: boolean;
   isMobileInputMode: boolean;
   peerPanelOpen: boolean;
   roomModalOpen: boolean;
   adminModalOpen: boolean;
+  deviceModalOpen: boolean;
+  profileModalOpen: boolean;
   themeMode: 'light' | 'dark';
   error: string;
   info: string;
@@ -39,6 +43,8 @@ type UseChatRouteEffectsArgs = {
   setAdminModalOpen: Dispatch<SetStateAction<boolean>>;
   setRoomModalOpen: Dispatch<SetStateAction<boolean>>;
   setPeerPanelOpen: Dispatch<SetStateAction<boolean>>;
+  closeDeviceModal: () => void;
+  closeProfileModal: () => void;
   closeSidebar: () => void;
   setIsMobileInputMode: Dispatch<SetStateAction<boolean>>;
   setSidebarOpen: Dispatch<SetStateAction<boolean>>;
@@ -52,11 +58,15 @@ export function useChatRouteEffects({
   peerPopoverRef,
   roomModalCardRef,
   adminModalCardRef,
+  deviceModalCardRef,
+  profileModalCardRef,
   sidebarOpen,
   isMobileInputMode,
   peerPanelOpen,
   roomModalOpen,
   adminModalOpen,
+  deviceModalOpen,
+  profileModalOpen,
   themeMode,
   error,
   info,
@@ -80,6 +90,8 @@ export function useChatRouteEffects({
   setAdminModalOpen,
   setRoomModalOpen,
   setPeerPanelOpen,
+  closeDeviceModal,
+  closeProfileModal,
   closeSidebar,
   setIsMobileInputMode,
   setSidebarOpen,
@@ -105,6 +117,16 @@ export function useChatRouteEffects({
   useFocusTrap({
     containerRef: adminModalCardRef,
     active: adminModalOpen,
+  });
+
+  useFocusTrap({
+    containerRef: deviceModalCardRef,
+    active: deviceModalOpen,
+  });
+
+  useFocusTrap({
+    containerRef: profileModalCardRef,
+    active: profileModalOpen,
   });
 
   useEffect(() => {
@@ -172,8 +194,16 @@ export function useChatRouteEffects({
       if (event.key !== 'Escape') {
         return;
       }
+      if (profileModalOpen) {
+        closeProfileModal();
+        return;
+      }
       if (adminModalOpen) {
         navigate(chatPathForRoom(selectedRoomID));
+        return;
+      }
+      if (deviceModalOpen) {
+        closeDeviceModal();
         return;
       }
       if (roomModalOpen) {
@@ -195,9 +225,13 @@ export function useChatRouteEffects({
   }, [
     adminModalOpen,
     chatPathForRoom,
+    closeDeviceModal,
+    closeProfileModal,
     closeSidebar,
+    deviceModalOpen,
     navigate,
     peerPanelOpen,
+    profileModalOpen,
     roomModalOpen,
     selectedRoomID,
     setPeerPanelOpen,
@@ -325,7 +359,7 @@ export function useChatRouteEffects({
   }, [sidebarOpen]);
 
   useEffect(() => {
-    if (!roomModalOpen && !adminModalOpen) {
+    if (!roomModalOpen && !adminModalOpen && !profileModalOpen) {
       return;
     }
     const previousOverflow = document.body.style.overflow;
@@ -333,7 +367,7 @@ export function useChatRouteEffects({
     return () => {
       document.body.style.overflow = previousOverflow;
     };
-  }, [adminModalOpen, roomModalOpen]);
+  }, [adminModalOpen, profileModalOpen, roomModalOpen]);
 
   useEffect(() => {
     if (!auth) {

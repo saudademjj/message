@@ -8,18 +8,22 @@ type ChatStore = {
   rooms: Room[];
   roomMembers: User[];
   selectedRoomID: number | null;
+  localReadCursors: Record<number, number>;
   messages: UIMessage[];
   messageReadReceipts: Record<number, number[]>;
   peers: Record<string, Peer>;
   sendQueue: SendQueueItem[];
+  localDraftMessages: UIMessage[];
   managedUsers: User[];
   setRooms: (next: ValueOrUpdater<Room[]>) => void;
   setRoomMembers: (next: ValueOrUpdater<User[]>) => void;
   setSelectedRoomID: (next: ValueOrUpdater<number | null>) => void;
+  setLocalReadCursor: (roomID: number, messageID: number) => void;
   setMessages: (next: ValueOrUpdater<UIMessage[]>) => void;
   setMessageReadReceipts: (next: ValueOrUpdater<Record<number, number[]>>) => void;
   setPeers: (next: ValueOrUpdater<Record<string, Peer>>) => void;
   setSendQueue: (next: ValueOrUpdater<SendQueueItem[]>) => void;
+  setLocalDraftMessages: (next: ValueOrUpdater<UIMessage[]>) => void;
   setManagedUsers: (next: ValueOrUpdater<User[]>) => void;
   resetSessionScopedState: () => void;
 };
@@ -35,10 +39,12 @@ export const useChatStore = create<ChatStore>((set) => ({
   rooms: [],
   roomMembers: [],
   selectedRoomID: null,
+  localReadCursors: {},
   messages: [],
   messageReadReceipts: {},
   peers: {},
   sendQueue: [],
+  localDraftMessages: [],
   managedUsers: [],
   setRooms: (next) => {
     set((state) => ({ rooms: resolveValue(next, state.rooms) }));
@@ -48,6 +54,23 @@ export const useChatStore = create<ChatStore>((set) => ({
   },
   setSelectedRoomID: (next) => {
     set((state) => ({ selectedRoomID: resolveValue(next, state.selectedRoomID) }));
+  },
+  setLocalReadCursor: (roomID, messageID) => {
+    set((state) => {
+      if (!Number.isFinite(roomID) || roomID <= 0 || !Number.isFinite(messageID) || messageID <= 0) {
+        return state;
+      }
+      const previous = state.localReadCursors[roomID] ?? 0;
+      if (messageID <= previous) {
+        return state;
+      }
+      return {
+        localReadCursors: {
+          ...state.localReadCursors,
+          [roomID]: messageID,
+        },
+      };
+    });
   },
   setMessages: (next) => {
     set((state) => ({ messages: resolveValue(next, state.messages) }));
@@ -61,6 +84,9 @@ export const useChatStore = create<ChatStore>((set) => ({
   setSendQueue: (next) => {
     set((state) => ({ sendQueue: resolveValue(next, state.sendQueue) }));
   },
+  setLocalDraftMessages: (next) => {
+    set((state) => ({ localDraftMessages: resolveValue(next, state.localDraftMessages) }));
+  },
   setManagedUsers: (next) => {
     set((state) => ({ managedUsers: resolveValue(next, state.managedUsers) }));
   },
@@ -69,10 +95,12 @@ export const useChatStore = create<ChatStore>((set) => ({
       rooms: [],
       roomMembers: [],
       selectedRoomID: null,
+      localReadCursors: {},
       messages: [],
       messageReadReceipts: {},
       peers: {},
       sendQueue: [],
+      localDraftMessages: [],
       managedUsers: [],
     });
   },
