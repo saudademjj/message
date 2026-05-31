@@ -89,6 +89,10 @@ func (a *App) withAuth(next func(http.ResponseWriter, *http.Request, AuthContext
 			respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid token"})
 			return
 		}
+		if claims.ExpiresAt == nil {
+			respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid token"})
+			return
+		}
 		if authSource == "cookie" && requiresCSRF(r.Method) && !validateCSRFToken(r) {
 			respondJSON(w, http.StatusForbidden, map[string]any{"error": "csrf token validation failed"})
 			return
@@ -125,6 +129,7 @@ func (a *App) withAuth(next func(http.ResponseWriter, *http.Request, AuthContext
 			DeviceName:           device.DeviceName,
 			DeviceSessionVersion: device.SessionVersion,
 			DeviceLastSeenAt:     device.LastSeenAt,
+			TokenExpiresAt:       claims.ExpiresAt.Time,
 		})
 	}
 }

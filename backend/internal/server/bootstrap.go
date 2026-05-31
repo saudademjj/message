@@ -63,6 +63,7 @@ func Run() {
 		loginIPLimiter:    newKeyedRateLimiter(perMinuteLimit(cfg.LoginIPRatePerMinute), cfg.LoginIPRateBurst, defaultRateLimitEntryTTL),
 		loginUserLimiter:  newKeyedRateLimiter(perMinuteLimit(cfg.LoginUserRatePerMinute), cfg.LoginUserRateBurst, defaultRateLimitEntryTTL),
 		wsConnectLimiter:  newKeyedRateLimiter(perMinuteLimit(cfg.WSConnectRatePerMinute), cfg.WSConnectRateBurst, defaultRateLimitEntryTTL),
+		ciphertextLimiter: newKeyedRateLimiter(perMinuteLimit(cfg.CipherRatePerMinute), cfg.CipherRateBurst, defaultRateLimitEntryTTL),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -83,16 +84,20 @@ func Run() {
 	mux.HandleFunc("/api/logout", app.handleLogout)
 	mux.HandleFunc("/api/refresh", app.handleRefresh)
 	mux.HandleFunc("/api/session", app.withAuth(app.handleSession))
+	mux.HandleFunc("/api/account/profile", app.withAuth(app.handleAccountProfile))
+	mux.HandleFunc("/api/account/password", app.withAuth(app.handleAccountPassword))
 	mux.HandleFunc("/api/admin/users", app.withAuth(app.withAdmin(app.handleAdminUsers)))
 	mux.HandleFunc("/api/admin/users/", app.withAuth(app.withAdmin(app.handleAdminUserSubroutes)))
 	mux.HandleFunc("/api/rooms", app.withAuth(app.handleRooms))
 	mux.HandleFunc("/api/rooms/", app.withAuth(app.handleRoomSubroutes))
 	mux.HandleFunc("/api/devices", app.withAuth(app.handleDevices))
 	mux.HandleFunc("/api/devices/", app.withAuth(app.handleDeviceSubroutes))
+	mux.HandleFunc("/api/device-secret", app.withAuth(app.handleDeviceSecretBlob))
 	mux.HandleFunc("/api/signal/prekey-bundle", app.withAuth(app.handleSignalPreKeyBundle))
 	mux.HandleFunc("/api/signal/prekey-bundle/", app.withAuth(app.handleSignalPreKeyBundleSubroutes))
 	mux.HandleFunc("/api/signal/safety-number/", app.withAuth(app.handleSignalSafetyNumberSubroutes))
 	mux.HandleFunc("/api/invites/join", app.withAuth(app.handleInviteJoin))
+	mux.HandleFunc("/ws/rooms", app.handleRoomSummaryWS)
 	mux.HandleFunc("/ws", app.handleWS)
 
 	handler := loggingMiddleware(app.withSecurityHeaders(app.withCORS(mux)))

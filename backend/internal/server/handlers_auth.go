@@ -20,7 +20,8 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := a.db.PingContext(ctx); err != nil {
-		respondJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "error": err.Error()})
+		logger.Error("healthz_db_ping_failed", "error", err)
+		respondJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded"})
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"status": "ok"})

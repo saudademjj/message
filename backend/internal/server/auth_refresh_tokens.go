@@ -229,6 +229,7 @@ func (a *App) rotateRefreshToken(ctx context.Context, presentedToken string) (Au
 		DeviceName:           deviceName,
 		DeviceSessionVersion: currentDeviceSessionVersion,
 		DeviceLastSeenAt:     now,
+		TokenExpiresAt:       now.Add(a.effectiveAccessTokenTTL()),
 	}, newToken, nil
 }
 

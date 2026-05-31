@@ -54,40 +54,26 @@ func isUniqueViolation(err error) bool {
 	return strings.Contains(value, "duplicate key value") || strings.Contains(value, "sqlstate 23505")
 }
 
+func canDeleteRoom(auth AuthContext, createdBy sql.NullInt64, isSystem bool) bool {
+	if auth.Role == "admin" {
+		return true
+	}
+	if isSystem {
+		return false
+	}
+	return createdBy.Valid && createdBy.Int64 == auth.UserID
+}
+
 func (a *App) handleRooms(w http.ResponseWriter, r *http.Request, auth AuthContext) {
 	switch r.Method {
 	case http.MethodGet:
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		rows, err := a.db.QueryContext(ctx, `
-SELECT r.id, r.name, r.created_at
-FROM rooms r
-JOIN room_members rm ON rm.room_id = r.id
-WHERE rm.user_id = $1
-ORDER BY r.id ASC
-`, auth.UserID)
+		rooms, err := listRoomSummaries(ctx, a.db, auth.UserID, auth.DeviceID)
 		if err != nil {
 			respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to fetch rooms"})
 			return
-		}
-		defer rows.Close()
-
-		type roomResp struct {
-			ID        int64  `json:"id"`
-			Name      string `json:"name"`
-			CreatedAt string `json:"createdAt"`
-		}
-		rooms := []roomResp{}
-		for rows.Next() {
-			var room roomResp
-			var createdAt time.Time
-			if err := rows.Scan(&room.ID, &room.Name, &createdAt); err != nil {
-				respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to decode rooms"})
-				return
-			}
-			room.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			rooms = append(rooms, room)
 		}
 		respondJSON(w, http.StatusOK, map[string]any{"rooms": rooms})
 
@@ -149,9 +135,12 @@ RETURNING id, name, created_at
 
 		respondJSON(w, http.StatusCreated, map[string]any{
 			"room": map[string]any{
-				"id":        roomID,
-				"name":      roomName,
-				"createdAt": createdAt.UTC().Format(time.RFC3339Nano),
+				"id":             roomID,
+				"name":           roomName,
+				"createdAt":      createdAt.UTC().Format(time.RFC3339Nano),
+				"lastMessageId":  nil,
+				"lastActivityAt": createdAt.UTC().Format(time.RFC3339Nano),
+				"unreadCount":    0,
 			},
 		})
 
@@ -216,13 +205,8 @@ func (a *App) handleDeleteRoom(w http.ResponseWriter, r *http.Request, auth Auth
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to load room"})
 		return
 	}
-	if isSystem {
-		respondJSON(w, http.StatusForbidden, map[string]any{"error": "system room cannot be deleted"})
-		return
-	}
 
-	allowed := auth.Role == "admin" || (createdBy.Valid && createdBy.Int64 == auth.UserID)
-	if !allowed {
+	if !canDeleteRoom(auth, createdBy, isSystem) {
 		respondJSON(w, http.StatusForbidden, map[string]any{"error": "only room creator or admin can delete room"})
 		return
 	}
@@ -395,9 +379,12 @@ func (a *App) handleInviteJoin(w http.ResponseWriter, r *http.Request, auth Auth
 	respondJSON(w, http.StatusOK, map[string]any{
 		"joined": true,
 		"room": map[string]any{
-			"id":        roomID,
-			"name":      roomName,
-			"createdAt": createdAt.UTC().Format(time.RFC3339Nano),
+			"id":             roomID,
+			"name":           roomName,
+			"createdAt":      createdAt.UTC().Format(time.RFC3339Nano),
+			"lastMessageId":  nil,
+			"lastActivityAt": createdAt.UTC().Format(time.RFC3339Nano),
+			"unreadCount":    0,
 		},
 	})
 }
@@ -445,24 +432,32 @@ func (a *App) handleRoomMessages(w http.ResponseWriter, r *http.Request, auth Au
 	if afterID > 0 {
 		orderedAsc = true
 		rows, err = a.db.QueryContext(ctx, `
-SELECT m.id, m.room_id, m.sender_id, u.username, m.payload, m.created_at, m.edited_at, m.revoked_at
+SELECT m.id, m.room_id, m.sender_id, u.username, m.payload, e.wrapped_key, m.created_at, m.edited_at, m.revoked_at
 	FROM messages m
 	JOIN users u ON u.id = m.sender_id
+	LEFT JOIN chat_mailbox.device_envelopes e
+	  ON e.message_id = m.id
+	 AND e.recipient_user_id = $4
+	 AND e.recipient_device_id = $5
 	WHERE m.room_id = $1
 	  AND m.id > $2
 	ORDER BY m.id ASC
 	LIMIT $3
-	`, roomID, afterID, limit+1)
+	`, roomID, afterID, limit+1, auth.UserID, auth.DeviceID)
 	} else {
 		rows, err = a.db.QueryContext(ctx, `
-SELECT m.id, m.room_id, m.sender_id, u.username, m.payload, m.created_at, m.edited_at, m.revoked_at
+SELECT m.id, m.room_id, m.sender_id, u.username, m.payload, e.wrapped_key, m.created_at, m.edited_at, m.revoked_at
 	FROM messages m
 	JOIN users u ON u.id = m.sender_id
+	LEFT JOIN chat_mailbox.device_envelopes e
+	  ON e.message_id = m.id
+	 AND e.recipient_user_id = $4
+	 AND e.recipient_device_id = $5
 	WHERE m.room_id = $1
 	  AND ($2::BIGINT <= 0 OR m.id < $2)
 	ORDER BY m.id DESC
 	LIMIT $3
-	`, roomID, beforeID, limit+1)
+	`, roomID, beforeID, limit+1, auth.UserID, auth.DeviceID)
 	}
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to fetch messages"})
@@ -474,6 +469,7 @@ SELECT m.id, m.room_id, m.sender_id, u.username, m.payload, m.created_at, m.edit
 	for rows.Next() {
 		var message StoredMessage
 		var payloadRaw []byte
+		var envelopeRaw []byte
 		var createdAt time.Time
 		var editedAt sql.NullTime
 		var revokedAt sql.NullTime
@@ -483,6 +479,7 @@ SELECT m.id, m.room_id, m.sender_id, u.username, m.payload, m.created_at, m.edit
 			&message.SenderID,
 			&message.SenderUsername,
 			&payloadRaw,
+			&envelopeRaw,
 			&createdAt,
 			&editedAt,
 			&revokedAt,
@@ -493,6 +490,7 @@ SELECT m.id, m.room_id, m.sender_id, u.username, m.payload, m.created_at, m.edit
 		if err := json.Unmarshal(payloadRaw, &message.Payload); err != nil {
 			continue
 		}
+		message.Payload = payloadForRecipient(message.Payload, auth.UserID, auth.DeviceID, envelopeRaw)
 		message.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 		if editedAt.Valid {
 			value := editedAt.Time.UTC().Format(time.RFC3339Nano)
@@ -515,6 +513,50 @@ SELECT m.id, m.room_id, m.sender_id, u.username, m.payload, m.created_at, m.edit
 			messages[left], messages[right] = messages[right], messages[left]
 		}
 	}
+
+	// For messages authored by the requesting user, restore the full set of
+	// recipient device addresses so the frontend can count expected readers
+	// (distinct recipient userIDs) for read/unread indicators. payloadForRecipient
+	// only attaches the sender's own wrapped key; we merge in placeholder entries
+	// for every other recipient device address without exposing their keys.
+	ownMessageIDs := make([]int64, 0, len(messages))
+	for _, message := range messages {
+		if message.SenderID == auth.UserID {
+			ownMessageIDs = append(ownMessageIDs, message.ID)
+		}
+	}
+	if len(ownMessageIDs) > 0 {
+		addressesByMessage, err := recipientAddressesForMessages(ctx, a.db, ownMessageIDs)
+		if err != nil {
+			respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to fetch read receipts"})
+			return
+		}
+		for index := range messages {
+			if messages[index].SenderID != auth.UserID {
+				continue
+			}
+			addresses := addressesByMessage[messages[index].ID]
+			if len(addresses) == 0 {
+				continue
+			}
+			merged := make(map[string]WrappedKey, len(addresses)+len(messages[index].Payload.WrappedKeys))
+			for address, wrapped := range messages[index].Payload.WrappedKeys {
+				merged[address] = wrapped
+			}
+			for _, address := range addresses {
+				if _, exists := merged[address]; !exists {
+					merged[address] = WrappedKey{}
+				}
+			}
+			messages[index].Payload.WrappedKeys = merged
+		}
+	}
+
+	deliveredIDs := make([]int64, 0, len(messages))
+	for _, message := range messages {
+		deliveredIDs = append(deliveredIDs, message.ID)
+	}
+	markEnvelopeDelivered(ctx, a.db, auth.UserID, auth.DeviceID, deliveredIDs)
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"messages": messages,

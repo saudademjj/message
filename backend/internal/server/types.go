@@ -24,6 +24,8 @@ const (
 	defaultLoginUserBurst  = 6
 	defaultWSConnPerMin    = 60
 	defaultWSConnBurst     = 20
+	defaultCipherPerMin    = 120
+	defaultCipherBurst     = 30
 	defaultShutdownSecs    = 20
 	defaultAccessTokenMins = 15
 	defaultRefreshTokenHrs = 24 * 14
@@ -42,6 +44,7 @@ type App struct {
 	loginIPLimiter    *keyedRateLimiter
 	loginUserLimiter  *keyedRateLimiter
 	wsConnectLimiter  *keyedRateLimiter
+	ciphertextLimiter *keyedRateLimiter
 	trustProxyHeaders bool
 	accessTokenTTL    time.Duration
 	refreshTokenTTL   time.Duration
@@ -65,11 +68,29 @@ type AuthContext struct {
 	DeviceName           string
 	DeviceSessionVersion int
 	DeviceLastSeenAt     time.Time
+	TokenExpiresAt       time.Time
 }
 
 type Hub struct {
-	mu    sync.RWMutex
-	rooms map[int64]map[*Client]struct{}
+	mu           sync.RWMutex
+	rooms        map[int64]map[*Client]struct{}
+	summaryUsers map[int64]map[*SummaryClient]struct{}
+}
+
+type Broadcaster interface {
+	AddClient(client *Client) []PeerSnapshot
+	RemoveClient(client *Client)
+	Broadcast(roomID int64, payload []byte)
+	BroadcastToRoomClients(roomID int64, build func(*Client) ([]byte, bool))
+	Unicast(roomID int64, userID int64, payload []byte)
+	UnicastToDevice(roomID int64, userID int64, deviceID string, payload []byte)
+	BroadcastToRooms(roomIDs []int64, payload []byte)
+	AddSummaryClient(client *SummaryClient)
+	RemoveSummaryClient(client *SummaryClient)
+	UnicastSummary(userID int64, payload []byte)
+	UnicastSummaryToDevice(userID int64, deviceID string, payload []byte)
+	KickUserDevice(userID int64, deviceID string, code int, reason string)
+	Shutdown()
 }
 
 type Client struct {
@@ -81,10 +102,24 @@ type Client struct {
 	deviceID   string
 	deviceName string
 	roomID     int64
+	sessionVer int
+	tokenExp   time.Time
 
 	mu               sync.RWMutex
 	publicKey        json.RawMessage
 	signingPublicKey json.RawMessage
+}
+
+type SummaryClient struct {
+	app        *App
+	conn       *websocket.Conn
+	send       chan []byte
+	userID     int64
+	username   string
+	deviceID   string
+	deviceName string
+	sessionVer int
+	tokenExp   time.Time
 }
 
 type PeerSnapshot struct {
@@ -99,6 +134,7 @@ type PeerSnapshot struct {
 type WrappedKey struct {
 	IV                  string          `json:"iv"`
 	WrappedKey          string          `json:"wrappedKey"`
+	RecipientAAD        string          `json:"recipientAad,omitempty"`
 	RatchetDHPublicJWK  json.RawMessage `json:"ratchetDhPublicKeyJwk,omitempty"`
 	MessageNumber       int             `json:"messageNumber"`
 	PreviousChainLength int             `json:"previousChainLength"`
@@ -144,8 +180,10 @@ type WSIncoming struct {
 	ContentType           string                `json:"contentType,omitempty"`
 	SenderDeviceID        string                `json:"senderDeviceId,omitempty"`
 	EncryptionScheme      string                `json:"encryptionScheme,omitempty"`
+	FromDeviceID          string                `json:"fromDeviceId,omitempty"`
 	ToUserID              int64                 `json:"toUserId,omitempty"`
 	ToDeviceID            string                `json:"toDeviceId,omitempty"`
+	MessageIDs            []int64               `json:"messageIds,omitempty"`
 	Step                  string                `json:"step,omitempty"`
 	Action                string                `json:"action,omitempty"`
 	Mode                  string                `json:"mode,omitempty"`
@@ -155,6 +193,11 @@ type WSIncoming struct {
 	RatchetDHPublic       json.RawMessage       `json:"ratchetDhPublicKeyJwk,omitempty"`
 	IdentityPublicJWK     json.RawMessage       `json:"identityPublicKeyJwk,omitempty"`
 	IdentitySigningPubJWK json.RawMessage       `json:"identitySigningPublicKeyJwk,omitempty"`
+}
+
+type DeviceEnvelopeRefillEntry struct {
+	MessageID  int64      `json:"messageId"`
+	WrappedKey WrappedKey `json:"wrappedKey"`
 }
 
 type ProtocolErrorFrame struct {
@@ -191,13 +234,19 @@ type SignalDevicePreKeyBundle struct {
 	SignedPreKey          SignalSignedPreKey   `json:"signedPreKey"`
 	OneTimePreKey         *SignalOneTimePreKey `json:"oneTimePreKey,omitempty"`
 	UpdatedAt             string               `json:"updatedAt"`
+	OneTimePreKeyConsumed bool                 `json:"oneTimePreKeyConsumed"`
+	OneTimePreKeyLow      bool                 `json:"oneTimePreKeyLow"`
+	OneTimePreKeysLeft    int64                `json:"oneTimePreKeysLeft"`
 }
 
 type SignalPreKeyBundleResponse struct {
-	UserID    int64                      `json:"userId"`
-	Username  string                     `json:"username"`
-	Devices   []SignalDevicePreKeyBundle `json:"devices"`
-	UpdatedAt string                     `json:"updatedAt"`
+	UserID             int64                      `json:"userId"`
+	Username           string                     `json:"username"`
+	Devices            []SignalDevicePreKeyBundle `json:"devices"`
+	ActiveDeviceCount  int64                      `json:"activeDeviceCount"`
+	ReadyDeviceCount   int64                      `json:"readyDeviceCount"`
+	MissingDeviceCount int64                      `json:"missingDeviceCount"`
+	UpdatedAt          string                     `json:"updatedAt"`
 }
 
 type DeviceSnapshot struct {
@@ -206,6 +255,9 @@ type DeviceSnapshot struct {
 	SessionVersion int     `json:"sessionVersion"`
 	CreatedAt      string  `json:"createdAt"`
 	LastSeenAt     string  `json:"lastSeenAt"`
+	TrustStatus    string  `json:"trustStatus"`
+	PendingSince   *string `json:"pendingSince,omitempty"`
+	ApprovedAt     *string `json:"approvedAt,omitempty"`
 	RevokedAt      *string `json:"revokedAt,omitempty"`
 	Current        bool    `json:"current"`
 }
@@ -219,6 +271,23 @@ type StoredMessage struct {
 	EditedAt       *string       `json:"editedAt,omitempty"`
 	RevokedAt      *string       `json:"revokedAt,omitempty"`
 	Payload        CipherPayload `json:"payload"`
+}
+
+type DeviceSecretBlob struct {
+	BlobVersion   int             `json:"blobVersion"`
+	KDFSalt       string          `json:"kdfSalt"`
+	RecoveryHint  string          `json:"recoveryHint"`
+	EncryptedBlob json.RawMessage `json:"encryptedBlob"`
+	UpdatedAt     string          `json:"updatedAt,omitempty"`
+}
+
+type RoomSummary struct {
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	CreatedAt      string `json:"createdAt"`
+	LastMessageID  *int64 `json:"lastMessageId"`
+	LastActivityAt string `json:"lastActivityAt"`
+	UnreadCount    int64  `json:"unreadCount"`
 }
 
 var (

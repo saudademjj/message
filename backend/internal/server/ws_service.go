@@ -22,6 +22,8 @@ var (
 const (
 	protocolErrorLegacyPayload = "legacy_payload_not_supported"
 	protocolErrorInvalidFormat = "invalid_payload_format"
+	protocolErrorRateLimited   = "ciphertext_rate_limited"
+	protocolErrorAuthExpired   = "websocket_auth_expired"
 )
 
 func validWrappedRecipientAddress(recipientID string) bool {
@@ -52,6 +54,39 @@ func validateV3CipherPayload(payload CipherPayload) error {
 		}
 	}
 	return nil
+}
+
+// allowResyncRouting decides whether a decrypt_recovery_request /
+// decrypt_recovery_payload frame may be forwarded between (requesterUserID,
+// requesterDeviceID) and (targetUserID, targetDeviceID).
+//
+// Same-user cross-device requests are allowed (so a user's secondary device
+// can ask the device that originally sent the message to retransmit), but
+// same-user same-device requests are rejected because they would loop back to
+// the requester itself. Different users always pass.
+func allowResyncRouting(
+	requesterUserID int64,
+	requesterDeviceID string,
+	targetUserID int64,
+	targetDeviceID string,
+) bool {
+	if requesterUserID <= 0 || targetUserID <= 0 {
+		return false
+	}
+	if requesterUserID != targetUserID {
+		return true
+	}
+	requesterDevice := normalizeDeviceID(requesterDeviceID)
+	targetDevice := normalizeDeviceID(targetDeviceID)
+	if requesterDevice == "" {
+		return false
+	}
+	// Empty target device implies "broadcast to all of this user's devices",
+	// which would include the requester itself — disallow that for self-user.
+	if targetDevice == "" {
+		return false
+	}
+	return requesterDevice != targetDevice
 }
 
 func protocolErrorFromValidation(err error) (code string, message string) {
@@ -115,14 +150,9 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenString, _ := authTokenFromRequest(r)
-	if tokenString == "" {
-		respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "authorization required"})
-		return
-	}
-	claims, err := a.parseToken(tokenString)
-	if err != nil {
-		respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid token"})
+	auth, status, message := a.authenticateWebSocketRequest(r)
+	if status != http.StatusOK {
+		respondJSON(w, status, map[string]any{"error": message})
 		return
 	}
 
@@ -134,28 +164,6 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	role, err := a.ensureUserIdentity(ctx, claims.UserID, claims.Username)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, errInvalidIdentity) {
-			respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "authorization required"})
-			return
-		}
-		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to validate identity"})
-		return
-	}
-	if role != claims.Role {
-		respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "token role mismatch"})
-		return
-	}
-	device, err := a.validateDeviceClaim(ctx, claims.UserID, claims.DeviceID, claims.DeviceSessionVersion)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, errInvalidIdentity) {
-			respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "device session expired"})
-			return
-		}
-		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to validate device session"})
-		return
-	}
 
 	if err := a.ensureRoomExists(ctx, roomID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -166,7 +174,7 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.ensureMembership(ctx, claims.UserID, roomID); err != nil {
+	if err := a.ensureMembership(ctx, auth.UserID, roomID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			respondJSON(w, http.StatusForbidden, map[string]any{"error": "not a room member"})
 			return
@@ -185,11 +193,13 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 		app:        a,
 		conn:       conn,
 		send:       make(chan []byte, 256),
-		userID:     claims.UserID,
-		username:   claims.Username,
-		deviceID:   device.DeviceID,
-		deviceName: device.DeviceName,
+		userID:     auth.UserID,
+		username:   auth.Username,
+		deviceID:   auth.DeviceID,
+		deviceName: auth.DeviceName,
 		roomID:     roomID,
+		sessionVer: auth.DeviceSessionVersion,
+		tokenExp:   auth.TokenExpiresAt,
 	}
 
 	peers := a.hub.AddClient(client)
@@ -287,6 +297,10 @@ func (c *Client) readPump() {
 			}
 
 		case "ciphertext":
+			if c.app.ciphertextLimiter != nil && !c.app.ciphertextLimiter.Allow(fmt.Sprintf("%d:%s:%d", c.userID, c.deviceID, c.roomID)) {
+				c.sendProtocolError(protocolErrorRateLimited, "发送过快，请稍后再试。")
+				continue
+			}
 			if incoming.Ciphertext == "" || incoming.MessageIV == "" || len(incoming.WrappedKeys) == 0 {
 				continue
 			}
@@ -369,17 +383,25 @@ func (c *Client) readPump() {
 				continue
 			}
 
-			if out, err := json.Marshal(map[string]any{
-				"type":           "ciphertext",
-				"id":             messageID,
-				"roomId":         c.roomID,
-				"senderId":       c.userID,
-				"senderUsername": c.username,
-				"createdAt":      createdAt.UTC().Format(time.RFC3339Nano),
-				"payload":        payload,
-			}); err == nil {
-				c.app.hub.Broadcast(c.roomID, out)
-			}
+			c.app.hub.BroadcastToRoomClients(c.roomID, func(target *Client) ([]byte, bool) {
+				var targetPayload CipherPayload
+				if target.userID == c.userID {
+					targetPayload = senderEchoPayload(payload, target.userID, target.deviceID)
+				} else {
+					targetPayload = payloadForRecipient(payload, target.userID, target.deviceID, mustMarshalWrappedKeyForTarget(payload, target.userID, target.deviceID))
+				}
+				out, err := json.Marshal(map[string]any{
+					"type":           "ciphertext",
+					"id":             messageID,
+					"roomId":         c.roomID,
+					"senderId":       c.userID,
+					"senderUsername": c.username,
+					"createdAt":      createdAt.UTC().Format(time.RFC3339Nano),
+					"payload":        targetPayload,
+				})
+				return out, err == nil
+			})
+			go c.app.publishRoomSummaryUpdatesForRoom(c.roomID)
 
 		case "typing_status":
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -418,6 +440,22 @@ func (c *Client) readPump() {
 					`UPDATE room_members SET last_read_message_id = GREATEST(last_read_message_id, $1) WHERE user_id = $2 AND room_id = $3`,
 					incoming.UpToMessageID, c.userID, c.roomID,
 				)
+				_, _ = c.app.db.ExecContext(ctx, `
+UPDATE chat_mailbox.device_envelopes
+SET read_at = COALESCE(read_at, NOW()),
+    delivered_at = COALESCE(delivered_at, NOW())
+WHERE room_id = $1
+  AND recipient_user_id = $2
+  AND recipient_device_id = $3
+  AND message_id <= $4
+`, c.roomID, c.userID, c.deviceID, incoming.UpToMessageID)
+				_, _ = c.app.db.ExecContext(ctx, `
+INSERT INTO chat_mailbox.device_inbox_cursors(user_id, device_id, room_id, last_envelope_message_id, updated_at)
+VALUES ($1, $2, $3, $4, NOW())
+ON CONFLICT (user_id, device_id, room_id) DO UPDATE
+SET last_envelope_message_id = GREATEST(chat_mailbox.device_inbox_cursors.last_envelope_message_id, EXCLUDED.last_envelope_message_id),
+    updated_at = NOW()
+`, c.userID, c.deviceID, c.roomID, incoming.UpToMessageID)
 			}
 			cancel()
 			if err != nil {
@@ -432,6 +470,7 @@ func (c *Client) readPump() {
 			}); err == nil {
 				c.app.hub.Broadcast(c.roomID, payload)
 			}
+			go c.app.publishRoomSummaryUpdate(c.userID, c.deviceID, c.roomID)
 
 		case "message_update":
 			if incoming.MessageID <= 0 {
@@ -537,37 +576,31 @@ func (c *Client) readPump() {
 				continue
 			}
 
-			payloadJSON, err := json.Marshal(payload)
-			if err != nil {
-				cancel()
-				continue
-			}
-
-			var editedAt time.Time
-			err = c.app.db.QueryRowContext(ctx,
-				`UPDATE messages
-					 SET payload = $1::jsonb, edited_at = NOW(), revoked_at = NULL
-					 WHERE id = $2 AND room_id = $3 AND sender_id = $4
-					 RETURNING edited_at`,
-				payloadJSON, incoming.MessageID, c.roomID, c.userID,
-			).Scan(&editedAt)
+			editedAt, err := c.app.updateMessagePayload(ctx, incoming.MessageID, c.roomID, c.userID, payload)
 			cancel()
 			if err != nil {
 				continue
 			}
 
-			if out, err := json.Marshal(map[string]any{
-				"type":         "message_update",
-				"roomId":       c.roomID,
-				"messageId":    incoming.MessageID,
-				"mode":         "edit",
-				"fromUserId":   c.userID,
-				"fromUsername": c.username,
-				"editedAt":     editedAt.UTC().Format(time.RFC3339Nano),
-				"payload":      payload,
-			}); err == nil {
-				c.app.hub.Broadcast(c.roomID, out)
-			}
+			c.app.hub.BroadcastToRoomClients(c.roomID, func(target *Client) ([]byte, bool) {
+				var targetPayload CipherPayload
+				if target.userID == c.userID {
+					targetPayload = senderEchoPayload(payload, target.userID, target.deviceID)
+				} else {
+					targetPayload = payloadForRecipient(payload, target.userID, target.deviceID, mustMarshalWrappedKeyForTarget(payload, target.userID, target.deviceID))
+				}
+				out, err := json.Marshal(map[string]any{
+					"type":         "message_update",
+					"roomId":       c.roomID,
+					"messageId":    incoming.MessageID,
+					"mode":         "edit",
+					"fromUserId":   c.userID,
+					"fromUsername": c.username,
+					"editedAt":     editedAt.UTC().Format(time.RFC3339Nano),
+					"payload":      targetPayload,
+				})
+				return out, err == nil
+			})
 
 		case "decrypt_ack":
 			if incoming.MessageID <= 0 || strings.TrimSpace(incoming.AckSignature) == "" {
@@ -647,7 +680,15 @@ func (c *Client) readPump() {
 				incoming.MessageID, c.roomID,
 			).Scan(&senderID)
 			cancel()
-			if err != nil || senderID <= 0 || senderID == c.userID {
+			if err != nil || senderID <= 0 {
+				continue
+			}
+			targetDeviceID := normalizeDeviceID(incoming.ToDeviceID)
+			// Allow same-user cross-device resync (a user's secondary device
+			// asking the device that originally sent the message to retransmit),
+			// but reject same-user same-device requests which would loop back to
+			// the requester itself.
+			if !allowResyncRouting(c.userID, c.deviceID, senderID, targetDeviceID) {
 				continue
 			}
 
@@ -659,15 +700,49 @@ func (c *Client) readPump() {
 				"fromUsername": c.username,
 				"fromDeviceId": c.deviceID,
 				"toUserId":     senderID,
-				"toDeviceId":   normalizeDeviceID(incoming.ToDeviceID),
+				"toDeviceId":   targetDeviceID,
 				"action":       action,
 			}); err == nil {
-				targetDeviceID := normalizeDeviceID(incoming.ToDeviceID)
 				if targetDeviceID != "" {
 					c.app.hub.UnicastToDevice(c.roomID, senderID, targetDeviceID, payload)
 				} else {
 					c.app.hub.Unicast(c.roomID, senderID, payload)
 				}
+			}
+
+		case "envelope_refill_request":
+			targetDeviceID := normalizeDeviceID(incoming.FromDeviceID)
+			if targetDeviceID == "" {
+				continue
+			}
+			if targetDeviceID == c.deviceID {
+				continue
+			}
+			messageIDs := incoming.MessageIDs
+			if len(messageIDs) > 200 {
+				messageIDs = messageIDs[:200]
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := c.app.ensureMembership(ctx, c.userID, c.roomID); err != nil {
+				cancel()
+				continue
+			}
+			device, err := c.app.loadActiveDevice(ctx, c.userID, targetDeviceID)
+			cancel()
+			if err != nil || device.TrustStatus != "approved" {
+				continue
+			}
+			if payload, err := json.Marshal(map[string]any{
+				"type":         "envelope_refill_request",
+				"roomId":       c.roomID,
+				"fromUserId":   c.userID,
+				"fromUsername": c.username,
+				"fromDeviceId": targetDeviceID,
+				"toUserId":     c.userID,
+				"toDeviceId":   c.deviceID,
+				"messageIds":   messageIDs,
+			}); err == nil {
+				c.app.hub.UnicastToDevice(c.roomID, c.userID, c.deviceID, payload)
 			}
 
 		case "decrypt_recovery_payload":
@@ -755,6 +830,12 @@ func (c *Client) readPump() {
 			if err != nil || originalSenderID != c.userID {
 				continue
 			}
+			recoveryTargetDeviceID := normalizeDeviceID(incoming.ToDeviceID)
+			// Reject self-targeted recovery (same user, same device or empty
+			// target) which would loop back to the sender itself.
+			if !allowResyncRouting(c.userID, c.deviceID, incoming.ToUserID, recoveryTargetDeviceID) {
+				continue
+			}
 
 			if out, err := json.Marshal(map[string]any{
 				"type":         "decrypt_recovery_payload",
@@ -764,12 +845,11 @@ func (c *Client) readPump() {
 				"fromUsername": c.username,
 				"fromDeviceId": c.deviceID,
 				"toUserId":     incoming.ToUserID,
-				"toDeviceId":   normalizeDeviceID(incoming.ToDeviceID),
+				"toDeviceId":   recoveryTargetDeviceID,
 				"payload":      payload,
 			}); err == nil {
-				targetDeviceID := normalizeDeviceID(incoming.ToDeviceID)
-				if targetDeviceID != "" {
-					c.app.hub.UnicastToDevice(c.roomID, incoming.ToUserID, targetDeviceID, out)
+				if recoveryTargetDeviceID != "" {
+					c.app.hub.UnicastToDevice(c.roomID, incoming.ToUserID, recoveryTargetDeviceID, out)
 				} else {
 					c.app.hub.Unicast(c.roomID, incoming.ToUserID, out)
 				}
@@ -780,7 +860,9 @@ func (c *Client) readPump() {
 
 func (c *Client) writePump() {
 	ticker := time.NewTicker(30 * time.Second)
+	authTicker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
+	defer authTicker.Stop()
 
 	for {
 		select {
@@ -820,6 +902,30 @@ func (c *Client) writePump() {
 				)
 				return
 			}
+		case <-authTicker.C:
+			if !c.validateStillAuthorized() {
+				c.sendProtocolError(protocolErrorAuthExpired, "登录状态已失效，请重新登录。")
+				_ = c.conn.WriteControl(
+					websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "device session expired"),
+					time.Now().Add(time.Second),
+				)
+				_ = c.conn.Close()
+				return
+			}
 		}
 	}
+}
+
+func (c *Client) validateStillAuthorized() bool {
+	if c.tokenExp.IsZero() || !time.Now().UTC().Before(c.tokenExp.UTC()) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	device, err := c.app.validateDeviceClaim(ctx, c.userID, c.deviceID, c.sessionVer)
+	if err != nil {
+		return false
+	}
+	return device.DeviceID == c.deviceID
 }

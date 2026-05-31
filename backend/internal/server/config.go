@@ -27,6 +27,8 @@ type runtimeConfig struct {
 	LoginUserRateBurst      int
 	WSConnectRatePerMinute  int
 	WSConnectRateBurst      int
+	CipherRatePerMinute     int
+	CipherRateBurst         int
 	GracefulShutdownTimeout time.Duration
 }
 
@@ -56,6 +58,14 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 		return runtimeConfig{}, err
 	}
 	wsConnectRateBurst, err := readPositiveIntEnv("WS_RATE_LIMIT_IP_BURST", defaultWSConnBurst)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	cipherRatePerMinute, err := readPositiveIntEnv("CIPHERTEXT_RATE_LIMIT_USER_PER_MINUTE", defaultCipherPerMin)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	cipherRateBurst, err := readPositiveIntEnv("CIPHERTEXT_RATE_LIMIT_USER_BURST", defaultCipherBurst)
 	if err != nil {
 		return runtimeConfig{}, err
 	}
@@ -90,6 +100,8 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 		LoginUserRateBurst:      loginUserRateBurst,
 		WSConnectRatePerMinute:  wsConnectRatePerMinute,
 		WSConnectRateBurst:      wsConnectRateBurst,
+		CipherRatePerMinute:     cipherRatePerMinute,
+		CipherRateBurst:         cipherRateBurst,
 		GracefulShutdownTimeout: time.Duration(shutdownTimeoutSecs) * time.Second,
 	}
 

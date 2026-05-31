@@ -102,15 +102,18 @@ type deviceRecord struct {
 	SessionVersion int
 	CreatedAt      time.Time
 	LastSeenAt     time.Time
+	TrustStatus    string
+	PendingSince   sql.NullTime
+	ApprovedAt     sql.NullTime
 	RevokedAt      sql.NullTime
 }
 
 func (a *App) listUserDevices(ctx context.Context, userID int64) ([]deviceRecord, error) {
 	rows, err := a.db.QueryContext(ctx, `
-SELECT user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at
+SELECT user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at
 FROM user_devices
 WHERE user_id = $1
-ORDER BY (revoked_at IS NULL) DESC, last_seen_at DESC, created_at DESC
+ORDER BY (revoked_at IS NULL) DESC, (trust_status = 'pending') DESC, last_seen_at DESC, created_at DESC
 `, userID)
 	if err != nil {
 		return nil, err
@@ -127,6 +130,9 @@ ORDER BY (revoked_at IS NULL) DESC, last_seen_at DESC, created_at DESC
 			&item.SessionVersion,
 			&item.CreatedAt,
 			&item.LastSeenAt,
+			&item.TrustStatus,
+			&item.PendingSince,
+			&item.ApprovedAt,
 			&item.RevokedAt,
 		); err != nil {
 			return nil, err
@@ -139,7 +145,7 @@ ORDER BY (revoked_at IS NULL) DESC, last_seen_at DESC, created_at DESC
 func (a *App) loadActiveDevice(ctx context.Context, userID int64, deviceID string) (deviceRecord, error) {
 	var device deviceRecord
 	err := a.db.QueryRowContext(ctx, `
-SELECT user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at
+SELECT user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at
 FROM user_devices
 WHERE user_id = $1
   AND device_id = $2
@@ -151,6 +157,9 @@ WHERE user_id = $1
 		&device.SessionVersion,
 		&device.CreatedAt,
 		&device.LastSeenAt,
+		&device.TrustStatus,
+		&device.PendingSince,
+		&device.ApprovedAt,
 		&device.RevokedAt,
 	)
 	if err != nil {
@@ -167,7 +176,7 @@ SET last_seen_at = NOW()
 WHERE user_id = $1
   AND device_id = $2
   AND revoked_at IS NULL
-RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at
+RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at
 `, userID, deviceID).Scan(
 		&device.UserID,
 		&device.DeviceID,
@@ -175,6 +184,9 @@ RETURNING user_id, device_id, device_name, session_version, created_at, last_see
 		&device.SessionVersion,
 		&device.CreatedAt,
 		&device.LastSeenAt,
+		&device.TrustStatus,
+		&device.PendingSince,
+		&device.ApprovedAt,
 		&device.RevokedAt,
 	)
 	if err != nil {
@@ -190,6 +202,14 @@ func (a *App) upsertLoginDevice(
 	incomingDeviceName string,
 ) (deviceRecord, error) {
 	deviceID := normalizeDeviceID(incomingDeviceID)
+	existingActiveDevices := int64(0)
+	if err := a.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM user_devices
+WHERE user_id = $1 AND revoked_at IS NULL
+`, userID).Scan(&existingActiveDevices); err != nil {
+		return deviceRecord{}, err
+	}
 	if deviceID == "" {
 		nextDeviceID, err := generateDeviceID()
 		if err != nil {
@@ -201,8 +221,19 @@ func (a *App) upsertLoginDevice(
 
 	var device deviceRecord
 	err := a.db.QueryRowContext(ctx, `
-INSERT INTO user_devices(user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at)
-VALUES ($1, $2, $3, 1, NOW(), NOW(), NULL)
+INSERT INTO user_devices(user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at)
+VALUES (
+    $1,
+    $2,
+    $3,
+    1,
+    NOW(),
+    NOW(),
+    CASE WHEN $4::BIGINT = 0 THEN 'approved' ELSE 'pending' END,
+    CASE WHEN $4::BIGINT = 0 THEN NULL ELSE NOW() END,
+    CASE WHEN $4::BIGINT = 0 THEN NOW() ELSE NULL END,
+    NULL
+)
 ON CONFLICT (user_id, device_id) DO UPDATE
 SET device_name = CASE
         WHEN user_devices.revoked_at IS NULL THEN EXCLUDED.device_name
@@ -212,14 +243,17 @@ SET device_name = CASE
         WHEN user_devices.revoked_at IS NULL THEN NOW()
         ELSE user_devices.last_seen_at
     END
-RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at
-`, userID, deviceID, deviceName).Scan(
+RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at
+`, userID, deviceID, deviceName, existingActiveDevices).Scan(
 		&device.UserID,
 		&device.DeviceID,
 		&device.DeviceName,
 		&device.SessionVersion,
 		&device.CreatedAt,
 		&device.LastSeenAt,
+		&device.TrustStatus,
+		&device.PendingSince,
+		&device.ApprovedAt,
 		&device.RevokedAt,
 	)
 	if err != nil {
@@ -234,9 +268,9 @@ RETURNING user_id, device_id, device_name, session_version, created_at, last_see
 		}
 		recoveryName := normalizeDeviceName(deviceRecoverySessionName, deviceName)
 		err = a.db.QueryRowContext(ctx, `
-INSERT INTO user_devices(user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at)
-VALUES ($1, $2, $3, 1, NOW(), NOW(), NULL)
-RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at
+INSERT INTO user_devices(user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at)
+VALUES ($1, $2, $3, 1, NOW(), NOW(), 'pending', NOW(), NULL, NULL)
+RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at
 `, userID, recoveryDeviceID, recoveryName).Scan(
 			&device.UserID,
 			&device.DeviceID,
@@ -244,6 +278,9 @@ RETURNING user_id, device_id, device_name, session_version, created_at, last_see
 			&device.SessionVersion,
 			&device.CreatedAt,
 			&device.LastSeenAt,
+			&device.TrustStatus,
+			&device.PendingSince,
+			&device.ApprovedAt,
 			&device.RevokedAt,
 		)
 		if err != nil {
@@ -295,7 +332,7 @@ SET device_name = $3, last_seen_at = NOW()
 WHERE user_id = $1
   AND device_id = $2
   AND revoked_at IS NULL
-RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at
+RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at
 `, userID, normalizedDeviceID, nextName).Scan(
 		&device.UserID,
 		&device.DeviceID,
@@ -303,6 +340,9 @@ RETURNING user_id, device_id, device_name, session_version, created_at, last_see
 		&device.SessionVersion,
 		&device.CreatedAt,
 		&device.LastSeenAt,
+		&device.TrustStatus,
+		&device.PendingSince,
+		&device.ApprovedAt,
 		&device.RevokedAt,
 	)
 	if err != nil {
@@ -324,7 +364,7 @@ SET revoked_at = COALESCE(revoked_at, NOW()),
     last_seen_at = NOW()
 WHERE user_id = $1
   AND device_id = $2
-RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at
+RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at
 `, userID, normalizedDeviceID).Scan(
 		&device.UserID,
 		&device.DeviceID,
@@ -332,6 +372,9 @@ RETURNING user_id, device_id, device_name, session_version, created_at, last_see
 		&device.SessionVersion,
 		&device.CreatedAt,
 		&device.LastSeenAt,
+		&device.TrustStatus,
+		&device.PendingSince,
+		&device.ApprovedAt,
 		&device.RevokedAt,
 	)
 	if err != nil {
@@ -346,14 +389,65 @@ func toDeviceSnapshot(record deviceRecord, currentDeviceID string) DeviceSnapsho
 		value := record.RevokedAt.Time.UTC().Format(time.RFC3339Nano)
 		revokedAt = &value
 	}
+	var pendingSince *string
+	if record.PendingSince.Valid {
+		value := record.PendingSince.Time.UTC().Format(time.RFC3339Nano)
+		pendingSince = &value
+	}
+	var approvedAt *string
+	if record.ApprovedAt.Valid {
+		value := record.ApprovedAt.Time.UTC().Format(time.RFC3339Nano)
+		approvedAt = &value
+	}
+	trustStatus := strings.TrimSpace(record.TrustStatus)
+	if trustStatus == "" {
+		trustStatus = "approved"
+	}
 	return DeviceSnapshot{
 		DeviceID:       record.DeviceID,
 		DeviceName:     record.DeviceName,
 		SessionVersion: record.SessionVersion,
 		CreatedAt:      record.CreatedAt.UTC().Format(time.RFC3339Nano),
 		LastSeenAt:     record.LastSeenAt.UTC().Format(time.RFC3339Nano),
+		TrustStatus:    trustStatus,
+		PendingSince:   pendingSince,
+		ApprovedAt:     approvedAt,
 		RevokedAt:      revokedAt,
 		Current:        record.DeviceID == currentDeviceID,
 	}
 }
 
+func (a *App) approveUserDevice(ctx context.Context, userID int64, deviceID string, approvedBy int64) (deviceRecord, error) {
+	normalizedDeviceID := normalizeDeviceID(deviceID)
+	if normalizedDeviceID == "" || approvedBy <= 0 {
+		return deviceRecord{}, errInvalidIdentity
+	}
+	var device deviceRecord
+	err := a.db.QueryRowContext(ctx, `
+UPDATE user_devices
+SET trust_status = 'approved',
+    approved_at = NOW(),
+    approved_by_user_id = $3,
+    pending_since = NULL,
+    last_seen_at = NOW()
+WHERE user_id = $1
+  AND device_id = $2
+  AND revoked_at IS NULL
+RETURNING user_id, device_id, device_name, session_version, created_at, last_seen_at, trust_status, pending_since, approved_at, revoked_at
+`, userID, normalizedDeviceID, approvedBy).Scan(
+		&device.UserID,
+		&device.DeviceID,
+		&device.DeviceName,
+		&device.SessionVersion,
+		&device.CreatedAt,
+		&device.LastSeenAt,
+		&device.TrustStatus,
+		&device.PendingSince,
+		&device.ApprovedAt,
+		&device.RevokedAt,
+	)
+	if err != nil {
+		return deviceRecord{}, err
+	}
+	return device, nil
+}

@@ -29,8 +29,15 @@ WHERE COALESCE(TRIM(device_id), '') = '';
 ALTER TABLE auth_refresh_tokens
     ALTER COLUMN device_id SET NOT NULL;
 
--- Force full login/session rebuild before adding device FK constraints.
-TRUNCATE TABLE auth_refresh_tokens;
+-- Preserve existing refresh sessions by attaching each legacy token to a
+-- synthetic device row. Older access tokens will still expire naturally, and
+-- refresh will move the browser onto the device-aware session model without
+-- deleting auth state during migration.
+INSERT INTO user_devices(user_id, device_id, device_name, session_version, created_at, last_seen_at, revoked_at)
+SELECT DISTINCT user_id, device_id, 'Legacy Browser Device', device_session_version, NOW(), NOW(), NULL::timestamptz
+FROM auth_refresh_tokens
+WHERE COALESCE(TRIM(device_id), '') <> ''
+ON CONFLICT (user_id, device_id) DO NOTHING;
 
 ALTER TABLE auth_refresh_tokens
     DROP CONSTRAINT IF EXISTS auth_refresh_tokens_user_device_fk;
@@ -99,7 +106,5 @@ CREATE TABLE IF NOT EXISTS signal_device_one_time_prekeys (
 CREATE INDEX IF NOT EXISTS idx_signal_device_one_time_prekeys_available
     ON signal_device_one_time_prekeys(user_id, device_id, consumed_at, key_id);
 
-DELETE FROM signal_identity_key_history;
-DELETE FROM signal_identity_keys;
-DELETE FROM signal_signed_prekeys;
-DELETE FROM signal_one_time_prekeys;
+-- Keep legacy per-user signal tables intact. Device-scoped bundles are written
+-- to the new signal_device_* tables as clients reconnect and publish keys.

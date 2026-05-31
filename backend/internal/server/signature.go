@@ -68,61 +68,64 @@ func canonicalSignaturePayload(payload CipherPayload) ([]byte, error) {
 	sort.Strings(keys)
 
 	wrapped := make([]map[string]any, 0, len(keys))
-	for _, recipientID := range keys {
-		entry := payload.WrappedKeys[recipientID]
-		item := map[string]any{
-			"recipientId":           recipientID,
-			"iv":                    entry.IV,
-			"wrappedKey":            entry.WrappedKey,
-			"ratchetDhPublicKeyJwk": nil,
-			"preKeyMessage":         nil,
-			"messageNumber":         entry.MessageNumber,
-			"previousChainLength":   entry.PreviousChainLength,
-			"sessionVersion":        entry.SessionVersion,
-		}
-		if len(entry.RatchetDHPublicJWK) > 0 {
-			parsed, err := parseJWKMap(entry.RatchetDHPublicJWK)
-			if err != nil {
-				return nil, fmt.Errorf("invalid ratchet key for recipient %s: %w", recipientID, err)
+	if payload.Version < 4 {
+		for _, recipientID := range keys {
+			entry := payload.WrappedKeys[recipientID]
+			item := map[string]any{
+				"recipientId":           recipientID,
+				"iv":                    entry.IV,
+				"wrappedKey":            entry.WrappedKey,
+				"recipientAad":          entry.RecipientAAD,
+				"ratchetDhPublicKeyJwk": nil,
+				"preKeyMessage":         nil,
+				"messageNumber":         entry.MessageNumber,
+				"previousChainLength":   entry.PreviousChainLength,
+				"sessionVersion":        entry.SessionVersion,
 			}
-			item["ratchetDhPublicKeyJwk"] = parsed
-		}
-		if entry.PreKeyMessage != nil {
-			preKeyDoc := map[string]any{
-				"identityKeyJwk":              nil,
-				"identitySigningPublicKeyJwk": nil,
-				"ephemeralKeyJwk":             nil,
-				"signedPreKeyId":              entry.PreKeyMessage.SignedPreKeyID,
-				"oneTimePreKeyId":             nil,
-				"preKeyBundleUpdatedAt":       entry.PreKeyMessage.PreKeyBundleUpdatedAtISO,
-			}
-			if len(entry.PreKeyMessage.IdentityKeyJWK) > 0 {
-				parsed, err := parseJWKMap(entry.PreKeyMessage.IdentityKeyJWK)
+			if len(entry.RatchetDHPublicJWK) > 0 {
+				parsed, err := parseJWKMap(entry.RatchetDHPublicJWK)
 				if err != nil {
-					return nil, fmt.Errorf("invalid prekey identity key for recipient %s: %w", recipientID, err)
+					return nil, fmt.Errorf("invalid ratchet key for recipient %s: %w", recipientID, err)
 				}
-				preKeyDoc["identityKeyJwk"] = parsed
+				item["ratchetDhPublicKeyJwk"] = parsed
 			}
-			if len(entry.PreKeyMessage.IdentitySigningPubJWK) > 0 {
-				parsed, err := parseJWKMap(entry.PreKeyMessage.IdentitySigningPubJWK)
-				if err != nil {
-					return nil, fmt.Errorf("invalid prekey identity signing key for recipient %s: %w", recipientID, err)
+			if entry.PreKeyMessage != nil {
+				preKeyDoc := map[string]any{
+					"identityKeyJwk":              nil,
+					"identitySigningPublicKeyJwk": nil,
+					"ephemeralKeyJwk":             nil,
+					"signedPreKeyId":              entry.PreKeyMessage.SignedPreKeyID,
+					"oneTimePreKeyId":             nil,
+					"preKeyBundleUpdatedAt":       entry.PreKeyMessage.PreKeyBundleUpdatedAtISO,
 				}
-				preKeyDoc["identitySigningPublicKeyJwk"] = parsed
-			}
-			if len(entry.PreKeyMessage.EphemeralKeyJWK) > 0 {
-				parsed, err := parseJWKMap(entry.PreKeyMessage.EphemeralKeyJWK)
-				if err != nil {
-					return nil, fmt.Errorf("invalid prekey ephemeral key for recipient %s: %w", recipientID, err)
+				if len(entry.PreKeyMessage.IdentityKeyJWK) > 0 {
+					parsed, err := parseJWKMap(entry.PreKeyMessage.IdentityKeyJWK)
+					if err != nil {
+						return nil, fmt.Errorf("invalid prekey identity key for recipient %s: %w", recipientID, err)
+					}
+					preKeyDoc["identityKeyJwk"] = parsed
 				}
-				preKeyDoc["ephemeralKeyJwk"] = parsed
+				if len(entry.PreKeyMessage.IdentitySigningPubJWK) > 0 {
+					parsed, err := parseJWKMap(entry.PreKeyMessage.IdentitySigningPubJWK)
+					if err != nil {
+						return nil, fmt.Errorf("invalid prekey identity signing key for recipient %s: %w", recipientID, err)
+					}
+					preKeyDoc["identitySigningPublicKeyJwk"] = parsed
+				}
+				if len(entry.PreKeyMessage.EphemeralKeyJWK) > 0 {
+					parsed, err := parseJWKMap(entry.PreKeyMessage.EphemeralKeyJWK)
+					if err != nil {
+						return nil, fmt.Errorf("invalid prekey ephemeral key for recipient %s: %w", recipientID, err)
+					}
+					preKeyDoc["ephemeralKeyJwk"] = parsed
+				}
+				if entry.PreKeyMessage.OneTimePreKeyID != nil {
+					preKeyDoc["oneTimePreKeyId"] = *entry.PreKeyMessage.OneTimePreKeyID
+				}
+				item["preKeyMessage"] = preKeyDoc
 			}
-			if entry.PreKeyMessage.OneTimePreKeyID != nil {
-				preKeyDoc["oneTimePreKeyId"] = *entry.PreKeyMessage.OneTimePreKeyID
-			}
-			item["preKeyMessage"] = preKeyDoc
+			wrapped = append(wrapped, item)
 		}
-		wrapped = append(wrapped, item)
 	}
 
 	doc := map[string]any{
@@ -135,6 +138,9 @@ func canonicalSignaturePayload(payload CipherPayload) ([]byte, error) {
 		"contentType":               payload.ContentType,
 		"senderDeviceId":            payload.SenderDeviceID,
 		"encryptionScheme":          payload.EncryptionScheme,
+	}
+	if payload.Version >= 4 {
+		doc["wrappedKeys"] = []map[string]any{}
 	}
 	return json.Marshal(doc)
 }

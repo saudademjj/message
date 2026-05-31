@@ -68,8 +68,55 @@ RETURNING id
 		return err
 	}
 
-	var roomID int64
+	// Decide whether to (re)create the admin room.
+	//
+	// The admin room is auto-provisioned exactly once per admin identity,
+	// the first time that admin boots the server. After that we only enforce
+	// invariants (admin-only membership, is_system flag) on the existing
+	// row — we do NOT re-INSERT a deleted room. This lets administrators
+	// permanently delete the system room if they choose to.
+	var alreadyProvisioned bool
 	err = tx.QueryRowContext(ctx, `
+SELECT COALESCE(initial_room_provisioned, FALSE)
+FROM admin_bootstrap_state
+WHERE admin_user_id = $1
+`, adminID).Scan(&alreadyProvisioned)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	if alreadyProvisioned {
+		// Bootstrap already happened. Only enforce invariants on whatever
+		// admin-owned system room still exists; if the admin chose to delete
+		// it, leave it deleted.
+		var existingRoomID sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `
+SELECT id FROM rooms
+WHERE name = $1
+  AND COALESCE(is_system, FALSE) = TRUE
+  AND created_by = $2
+`, adminRoomName, adminID).Scan(&existingRoomID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if existingRoomID.Valid {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO room_members(room_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+				existingRoomID.Int64, adminID,
+			); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM room_members WHERE room_id = $1 AND user_id <> $2`,
+				existingRoomID.Int64, adminID,
+			); err != nil {
+				return err
+			}
+		}
+	} else {
+		// First-time bootstrap for this admin: create the room and mark the
+		// state record so subsequent reboots will not recreate it.
+		var roomID int64
+		err = tx.QueryRowContext(ctx, `
 INSERT INTO rooms(name, created_by, is_system)
 VALUES ($1, $2, TRUE)
 ON CONFLICT (name) DO UPDATE
@@ -77,26 +124,43 @@ SET created_by = EXCLUDED.created_by,
     is_system = TRUE
 RETURNING id
 `, adminRoomName, adminID).Scan(&roomID)
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO room_members(room_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			roomID, adminID,
+		); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM room_members WHERE room_id = $1 AND user_id <> $2`,
+			roomID, adminID,
+		); err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO admin_bootstrap_state(admin_user_id, initial_room_provisioned, initial_room_provisioned_at, updated_at)
+VALUES ($1, TRUE, NOW(), NOW())
+ON CONFLICT (admin_user_id) DO UPDATE
+SET initial_room_provisioned = TRUE,
+    initial_room_provisioned_at = COALESCE(admin_bootstrap_state.initial_room_provisioned_at, NOW()),
+    updated_at = NOW()
+`, adminID); err != nil {
+			return err
+		}
 	}
 
+	// One-time legacy cleanup: very early builds auto-created a non-system
+	// "general" room owned by nobody (created_by IS NULL). Only remove that
+	// orphaned legacy row — never a user-created room that happens to be named
+	// "general" (room names are user-choosable, 2-64 chars), which this
+	// previously deleted on every restart.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO room_members(room_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-		roomID, adminID,
-	); err != nil {
-		return err
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM room_members WHERE room_id = $1 AND user_id <> $2`,
-		roomID, adminID,
-	); err != nil {
-		return err
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM rooms WHERE name = 'general' AND COALESCE(is_system, FALSE) = FALSE`,
+		`DELETE FROM rooms WHERE name = 'general' AND COALESCE(is_system, FALSE) = FALSE AND created_by IS NULL`,
 	); err != nil {
 		return err
 	}

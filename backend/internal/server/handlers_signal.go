@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const maxOneTimePreKeysPerUpload = 512
+const (
+	maxOneTimePreKeysPerUpload = 512
+	oneTimePreKeyLowWatermark  = 8
+)
 
 func canonicalRawJSON(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 || !json.Valid(raw) {
@@ -213,6 +216,25 @@ func (a *App) handleSignalPreKeyBundleUpsert(w http.ResponseWriter, r *http.Requ
 	}
 	defer tx.Rollback()
 
+	var trustStatus string
+	if err := tx.QueryRowContext(ctx, `
+SELECT trust_status
+FROM user_devices
+WHERE user_id = $1
+  AND device_id = $2
+  AND revoked_at IS NULL
+`, auth.UserID, auth.DeviceID).Scan(&trustStatus); err != nil {
+		respondJSON(w, http.StatusForbidden, map[string]any{"error": "device is not active"})
+		return
+	}
+	if trustStatus != "approved" {
+		respondJSON(w, http.StatusForbidden, map[string]any{
+			"error": "device approval required before publishing prekey bundle",
+			"code":  "device_approval_required",
+		})
+		return
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO signal_device_identity_keys(user_id, device_id, identity_key_jwk, identity_signing_public_key_jwk, updated_at)
 VALUES ($1, $2, $3::jsonb, $4::jsonb, NOW())
@@ -260,18 +282,24 @@ SET key_id = EXCLUDED.key_id,
 
 	insertedOneTimePreKeys := 0
 	for _, entry := range req.OneTimePreKeys {
-		if _, err := tx.ExecContext(ctx, `
+		// The DELETE above already removed all UNCONSUMED keys for this device,
+		// so any remaining conflict here is with a key that was already CONSUMED
+		// by a peer's X3DH handshake. Use DO NOTHING (never reset consumed_at)
+		// to avoid resurrecting a consumed one-time prekey, which would allow
+		// the same OPK to be reused across two handshakes and weaken forward
+		// secrecy. Re-inserting an already-consumed key id is simply skipped.
+		result, err := tx.ExecContext(ctx, `
 INSERT INTO signal_device_one_time_prekeys(user_id, device_id, key_id, public_key_jwk, created_at, consumed_at)
 VALUES ($1, $2, $3, $4::jsonb, NOW(), NULL)
-ON CONFLICT (user_id, device_id, key_id) DO UPDATE
-SET public_key_jwk = EXCLUDED.public_key_jwk,
-    consumed_at = NULL,
-    created_at = NOW()
-`, auth.UserID, auth.DeviceID, entry.KeyID, entry.PublicKeyJWK); err != nil {
+ON CONFLICT (user_id, device_id, key_id) DO NOTHING
+`, auth.UserID, auth.DeviceID, entry.KeyID, entry.PublicKeyJWK)
+		if err != nil {
 			respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to upsert one-time prekeys"})
 			return
 		}
-		insertedOneTimePreKeys += 1
+		if affected, affErr := result.RowsAffected(); affErr == nil && affected > 0 {
+			insertedOneTimePreKeys += 1
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -279,12 +307,63 @@ SET public_key_jwk = EXCLUDED.public_key_jwk,
 		return
 	}
 
+	go a.publishUserBundleChanged(auth.UserID, auth.DeviceID, fingerprint)
+
 	respondJSON(w, http.StatusOK, map[string]any{
 		"ok":                  true,
 		"userId":              auth.UserID,
 		"signedPreKeyId":      req.SignedPreKey.KeyID,
 		"uploadedOneTimeKeys": insertedOneTimePreKeys,
 	})
+}
+
+// publishUserBundleChanged broadcasts a "user_bundle_changed" event to every
+// room the user belongs to so that other connected peers can refresh their
+// ratchet sessions and pick up newly registered devices without waiting for
+// the new device to connect to the room. Best-effort: failures are logged but
+// not returned to the upload caller.
+func (a *App) publishUserBundleChanged(userID int64, deviceID string, fingerprint string) {
+	if a.hub == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := a.db.QueryContext(ctx, `SELECT room_id FROM room_members WHERE user_id = $1`, userID)
+	if err != nil {
+		logger.Warn("list_user_rooms_for_bundle_event_failed", "user_id", userID, "error", err)
+		return
+	}
+	defer rows.Close()
+
+	roomIDs := make([]int64, 0, 8)
+	for rows.Next() {
+		var roomID int64
+		if err := rows.Scan(&roomID); err != nil {
+			logger.Warn("decode_user_room_id_for_bundle_event_failed", "user_id", userID, "error", err)
+			return
+		}
+		roomIDs = append(roomIDs, roomID)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("iterate_user_rooms_for_bundle_event_failed", "user_id", userID, "error", err)
+		return
+	}
+	if len(roomIDs) == 0 {
+		return
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"type":                "user_bundle_changed",
+		"userId":              userID,
+		"deviceId":            deviceID,
+		"identityFingerprint": fingerprint,
+		"updatedAt":           time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return
+	}
+	a.hub.BroadcastToRooms(roomIDs, payload)
 }
 
 func (a *App) handleSignalPreKeyBundleSelf(w http.ResponseWriter, r *http.Request, auth AuthContext) {
@@ -331,6 +410,16 @@ func (a *App) handleSignalPreKeyBundleFetchInternal(
 		return
 	}
 	response.UserID = targetUserID
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM user_devices
+WHERE user_id = $1
+  AND revoked_at IS NULL
+  AND trust_status = 'approved'
+`, targetUserID).Scan(&response.ActiveDeviceCount); err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to count active devices"})
+		return
+	}
 
 	rows, err := tx.QueryContext(ctx, `
 SELECT
@@ -349,6 +438,7 @@ JOIN signal_device_signed_prekeys sp
   ON sp.user_id = d.user_id AND sp.device_id = d.device_id
 WHERE d.user_id = $1
   AND d.revoked_at IS NULL
+  AND d.trust_status = 'approved'
 ORDER BY d.last_seen_at DESC, d.device_id ASC
 `, targetUserID)
 	if err != nil {
@@ -393,10 +483,8 @@ ORDER BY d.last_seen_at DESC, d.device_id ASC
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to iterate target prekey bundles"})
 		return
 	}
-	if len(devices) == 0 {
-		respondJSON(w, http.StatusNotFound, map[string]any{"error": "target user prekey bundle is not published"})
-		return
-	}
+	response.ReadyDeviceCount = int64(len(devices))
+	response.MissingDeviceCount = missingReadyDeviceCount(response.ActiveDeviceCount, response.ReadyDeviceCount)
 
 	if consumeOneTimePreKey {
 		for index := range devices {
@@ -422,15 +510,26 @@ WHERE user_id = $1 AND device_id = $2 AND key_id = $3
 				}
 				oneTimePreKey.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 				devices[index].OneTimePreKey = &oneTimePreKey
+				devices[index].OneTimePreKeyConsumed = true
 				if now.After(maxUpdatedAt) {
 					maxUpdatedAt = now
 				}
-				continue
-			}
-			if !errors.Is(err, sql.ErrNoRows) {
+			} else if !errors.Is(err, sql.ErrNoRows) {
 				respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to load one-time prekey"})
 				return
 			}
+
+			var remaining int64
+			if countErr := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM signal_device_one_time_prekeys
+WHERE user_id = $1 AND device_id = $2 AND consumed_at IS NULL
+`, targetUserID, devices[index].DeviceID).Scan(&remaining); countErr != nil {
+				respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to count one-time prekeys"})
+				return
+			}
+			devices[index].OneTimePreKeysLeft = remaining
+			devices[index].OneTimePreKeyLow = remaining <= oneTimePreKeyLowWatermark
 		}
 	}
 
@@ -475,10 +574,17 @@ WHERE user_id = $1 AND device_id = $2
 		return
 	}
 
+	targetDeviceID := normalizeDeviceID(r.URL.Query().Get("deviceId"))
+	if strings.TrimSpace(r.URL.Query().Get("deviceId")) != "" && targetDeviceID == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid target device id"})
+		return
+	}
+
 	var targetIdentityKey json.RawMessage
+	var targetDeviceName string
 	var targetUpdatedAt time.Time
-	if err := a.db.QueryRowContext(ctx, `
-SELECT ik.identity_key_jwk, ik.updated_at
+	query := `
+SELECT d.device_id, d.device_name, ik.identity_key_jwk, ik.updated_at
 FROM user_devices d
 JOIN signal_device_identity_keys ik
   ON ik.user_id = d.user_id AND ik.device_id = d.device_id
@@ -486,7 +592,22 @@ WHERE d.user_id = $1
   AND d.revoked_at IS NULL
 ORDER BY d.last_seen_at DESC, d.device_id ASC
 LIMIT 1
-`, targetUserID).Scan(&targetIdentityKey, &targetUpdatedAt); err != nil {
+`
+	args := []any{targetUserID}
+	if targetDeviceID != "" {
+		query = `
+SELECT d.device_id, d.device_name, ik.identity_key_jwk, ik.updated_at
+FROM user_devices d
+JOIN signal_device_identity_keys ik
+  ON ik.user_id = d.user_id AND ik.device_id = d.device_id
+WHERE d.user_id = $1
+  AND d.device_id = $2
+  AND d.revoked_at IS NULL
+LIMIT 1
+`
+		args = append(args, targetDeviceID)
+	}
+	if err := a.db.QueryRowContext(ctx, query, args...).Scan(&targetDeviceID, &targetDeviceName, &targetIdentityKey, &targetUpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			respondJSON(w, http.StatusNotFound, map[string]any{"error": "target identity key is not published"})
 			return
@@ -512,18 +633,20 @@ LIMIT 1
 	}
 
 	type historyEntry struct {
+		DeviceID    string `json:"deviceId"`
 		Fingerprint string `json:"fingerprint"`
 		FirstSeenAt string `json:"firstSeenAt"`
 		LastSeenAt  string `json:"lastSeenAt"`
 	}
 	history := make([]historyEntry, 0, 8)
 	rows, err := a.db.QueryContext(ctx, `
-SELECT fingerprint, first_seen_at, last_seen_at
+SELECT device_id, fingerprint, first_seen_at, last_seen_at
 FROM signal_device_identity_key_history
 WHERE user_id = $1
+  AND ($2 = '' OR device_id = $2)
 ORDER BY first_seen_at DESC
 LIMIT 20
-`, targetUserID)
+`, targetUserID, targetDeviceID)
 	if err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to load identity history"})
 		return
@@ -533,7 +656,7 @@ LIMIT 20
 		var item historyEntry
 		var firstSeenAt time.Time
 		var lastSeenAt time.Time
-		if err := rows.Scan(&item.Fingerprint, &firstSeenAt, &lastSeenAt); err != nil {
+		if err := rows.Scan(&item.DeviceID, &item.Fingerprint, &firstSeenAt, &lastSeenAt); err != nil {
 			respondJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to decode identity history"})
 			return
 		}
@@ -544,7 +667,10 @@ LIMIT 20
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"localUserId":               auth.UserID,
+		"localDeviceId":             auth.DeviceID,
 		"targetUserId":              targetUserID,
+		"targetDeviceId":            targetDeviceID,
+		"targetDeviceName":          targetDeviceName,
 		"localIdentityKeyJwk":       localIdentityKey,
 		"targetIdentityKeyJwk":      targetIdentityKey,
 		"localIdentityFingerprint":  localFingerprint,

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -82,6 +83,46 @@ func TestHandleRoomSubroutesGuards(t *testing.T) {
 	})
 }
 
+func TestHandleDeviceSubroutesGuards(t *testing.T) {
+	t.Parallel()
+
+	app := &App{}
+	auth := AuthContext{UserID: 1, Username: "alice", Role: "user", DeviceID: "device-a"}
+
+	t.Run("invalid path", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/api/devices", nil)
+		response := httptest.NewRecorder()
+
+		app.handleDeviceSubroutes(response, request, auth)
+
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("expected %d, got %d", http.StatusNotFound, response.Code)
+		}
+	})
+
+	t.Run("nested envelope refill wrong method", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodPost, "/api/devices/device-b/envelopes/refill", nil)
+		response := httptest.NewRecorder()
+
+		app.handleDeviceSubroutes(response, request, auth)
+
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected %d, got %d", http.StatusMethodNotAllowed, response.Code)
+		}
+	})
+
+	t.Run("unknown nested action", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodPut, "/api/devices/device-b/envelopes/unknown", nil)
+		response := httptest.NewRecorder()
+
+		app.handleDeviceSubroutes(response, request, auth)
+
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("expected %d, got %d", http.StatusNotFound, response.Code)
+		}
+	})
+}
+
 func TestHandleRoomMethodsWithoutDB(t *testing.T) {
 	t.Parallel()
 
@@ -142,4 +183,27 @@ func TestHandleRoomMethodsWithoutDB(t *testing.T) {
 			t.Fatalf("expected %d, got %d", http.StatusMethodNotAllowed, response.Code)
 		}
 	})
+}
+
+func TestCanDeleteRoom(t *testing.T) {
+	t.Parallel()
+
+	admin := AuthContext{UserID: 1, Role: "admin"}
+	user := AuthContext{UserID: 2, Role: "user"}
+
+	if !canDeleteRoom(admin, sql.NullInt64{}, true) {
+		t.Fatal("expected admin to delete system room")
+	}
+	if !canDeleteRoom(admin, sql.NullInt64{}, false) {
+		t.Fatal("expected admin to delete normal room")
+	}
+	if canDeleteRoom(user, sql.NullInt64{Int64: 2, Valid: true}, true) {
+		t.Fatal("expected non-admin to be blocked from deleting system room")
+	}
+	if !canDeleteRoom(user, sql.NullInt64{Int64: 2, Valid: true}, false) {
+		t.Fatal("expected creator to delete normal room")
+	}
+	if canDeleteRoom(user, sql.NullInt64{Int64: 3, Valid: true}, false) {
+		t.Fatal("expected non-creator to be blocked from deleting normal room")
+	}
 }

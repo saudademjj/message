@@ -109,3 +109,81 @@ func TestHubUnicastToDevice(t *testing.T) {
 	default:
 	}
 }
+
+func TestHubUnicastSummaryTargetsOnlyRequestedUser(t *testing.T) {
+	t.Parallel()
+
+	hub := NewHub()
+	aliceDesktop := &SummaryClient{userID: 1, deviceID: "desktop-01", send: make(chan []byte, 2)}
+	aliceMobile := &SummaryClient{userID: 1, deviceID: "mobile-01", send: make(chan []byte, 2)}
+	bobDesktop := &SummaryClient{userID: 2, deviceID: "desktop-02", send: make(chan []byte, 2)}
+
+	hub.AddSummaryClient(aliceDesktop)
+	hub.AddSummaryClient(aliceMobile)
+	hub.AddSummaryClient(bobDesktop)
+
+	hub.UnicastSummary(1, []byte("room-summary"))
+
+	if got := <-aliceDesktop.send; string(got) != "room-summary" {
+		t.Fatalf("unexpected alice desktop payload: %q", string(got))
+	}
+	if got := <-aliceMobile.send; string(got) != "room-summary" {
+		t.Fatalf("unexpected alice mobile payload: %q", string(got))
+	}
+	select {
+	case <-bobDesktop.send:
+		t.Fatalf("different user should not receive room summary")
+	default:
+	}
+}
+
+func TestHubBroadcastToRoomsDeduplicatesMultiRoomClients(t *testing.T) {
+	t.Parallel()
+
+	hub := NewHub()
+	// Alice has two browser tabs in two different rooms; both should receive
+	// the broadcast exactly once.
+	aliceRoomOne := &Client{roomID: 1, userID: 1, deviceID: "alice-01", send: make(chan []byte, 4)}
+	aliceRoomTwo := &Client{roomID: 2, userID: 1, deviceID: "alice-01", send: make(chan []byte, 4)}
+	bobRoomOne := &Client{roomID: 1, userID: 2, deviceID: "bob-01", send: make(chan []byte, 4)}
+	carolRoomThree := &Client{roomID: 3, userID: 3, deviceID: "carol-01", send: make(chan []byte, 4)}
+
+	hub.AddClient(aliceRoomOne)
+	hub.AddClient(aliceRoomTwo)
+	hub.AddClient(bobRoomOne)
+	hub.AddClient(carolRoomThree)
+
+	hub.BroadcastToRooms([]int64{1, 2}, []byte("bundle-changed"))
+
+	if got := <-aliceRoomOne.send; string(got) != "bundle-changed" {
+		t.Fatalf("unexpected alice room one payload: %q", string(got))
+	}
+	if got := <-aliceRoomTwo.send; string(got) != "bundle-changed" {
+		t.Fatalf("unexpected alice room two payload: %q", string(got))
+	}
+	if got := <-bobRoomOne.send; string(got) != "bundle-changed" {
+		t.Fatalf("unexpected bob room one payload: %q", string(got))
+	}
+	select {
+	case <-carolRoomThree.send:
+		t.Fatalf("client outside the listed rooms should not receive broadcast")
+	default:
+	}
+}
+
+func TestHubBroadcastToRoomsEmptyRoomList(t *testing.T) {
+	t.Parallel()
+
+	hub := NewHub()
+	alice := &Client{roomID: 1, userID: 1, deviceID: "alice-01", send: make(chan []byte, 1)}
+	hub.AddClient(alice)
+
+	hub.BroadcastToRooms(nil, []byte("noop"))
+	hub.BroadcastToRooms([]int64{}, []byte("noop"))
+
+	select {
+	case <-alice.send:
+		t.Fatalf("expected no payloads when broadcasting to empty room list")
+	default:
+	}
+}
