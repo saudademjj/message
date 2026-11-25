@@ -3,11 +3,12 @@ set -euo pipefail
 
 cd ~/e2ee-chat
 
-BACKEND_BIN="/opt/e2ee-chat/bin/e2ee-chat-backend"
-BACKEND_LOG="/opt/e2ee-chat/backend.log"
+APP_DIR="${CHAT_APP_DIR:-$HOME/e2ee-chat}"
+BACKEND_BIN="${APP_DIR}/bin/e2ee-chat-backend"
+BACKEND_LOG="${APP_DIR}/backend.log"
 CADDY_BIN="/usr/bin/caddy"
-CADDY_CONFIG="/opt/e2ee-chat/frontend/Caddyfile"
-CADDY_LOG="/opt/e2ee-chat/caddy.log"
+CADDY_CONFIG="${APP_DIR}/frontend/Caddyfile"
+CADDY_LOG="${APP_DIR}/caddy.log"
 CHAT_SITE_HOST_DEFAULT="chat.example.com"
 BACKEND_HEALTH_URL="http://127.0.0.1:8081/healthz"
 FRONTEND_PROXY_MODE_DEFAULT="local"

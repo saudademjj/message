@@ -20,7 +20,7 @@
     }
 
     handle {
-        root * /opt/e2ee-chat/frontend/dist
+        root * {$CHAT_WEB_ROOT:/opt/e2ee-chat/frontend/dist}
         try_files {path} /index.html
         file_server
     }
